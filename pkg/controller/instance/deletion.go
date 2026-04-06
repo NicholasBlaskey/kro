@@ -16,6 +16,7 @@ package instance
 
 import (
 	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,6 +25,7 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
+	"github.com/kubernetes-sigs/kro/pkg/controller/instance/applyset"
 	"github.com/kubernetes-sigs/kro/pkg/graph"
 	"github.com/kubernetes-sigs/kro/pkg/metadata"
 	"github.com/kubernetes-sigs/kro/pkg/runtime"
@@ -171,9 +173,29 @@ func (c *Controller) deleteTarget(
 	// Track whether any delete request was accepted. a successful Delete does NOT
 	// mean the object is gone yet, just that deletion is in progress.
 	anyDeleted := false
+	applySetID := applyset.ID(rcx.Instance)
+
 	for _, target := range targets {
+		// Check for other owners before deleting
+		hasOtherSharedOwners := false
+		for k := range target.GetLabels() {
+			if ownerID, found := strings.CutPrefix(k, applyset.OwnerLabelPrefix); found && ownerID != applySetID {
+				hasOtherSharedOwners = true
+				break
+			}
+		}
+
 		rc := resourceClientFor(rcx, node.Spec.Meta, target.GetNamespace())
-		err := rc.Delete(rcx.Ctx, target.GetName(), metav1.DeleteOptions{})
+
+		var err error
+		if hasOtherSharedOwners {
+			// Release ownership instead of deleting
+			err = c.releaseOwnership(rcx, target, rc, applySetID)
+		} else {
+			// Delete as normal
+			err = rc.Delete(rcx.Ctx, target.GetName(), metav1.DeleteOptions{})
+		}
+
 		if apierrors.IsNotFound(err) {
 			// Already gone: leave anyDeleted as is and keep checking others.
 			continue
@@ -244,4 +266,25 @@ func (c *Controller) setUnmanaged(rcx *ReconcileContext, obj *unstructured.Unstr
 		return nil, fmt.Errorf("failed to update unmanaged state: %w", err)
 	}
 	return updated, nil
+}
+
+// releaseOwnership releases this applyset's field ownership on a shared resource via empty SSA apply.
+// This allows other applysets to continue managing the resource after this instance is deleted.
+func (c *Controller) releaseOwnership(
+	rcx *ReconcileContext,
+	obj *unstructured.Unstructured,
+	rc dynamic.ResourceInterface,
+	applySetID string,
+) error {
+	// Doing an empty SSA apply releases all field ownership for this field manager.
+	// Fields with no remaining owners will be removed.
+	patchObj := instanceSSAPatch(obj)
+
+	fieldManager := fmt.Sprintf("%s-%s", applyset.FieldManager, applySetID)
+	_, err := rc.Apply(rcx.Ctx, obj.GetName(), patchObj, metav1.ApplyOptions{
+		FieldManager: fieldManager,
+		Force:        false,
+	})
+
+	return err
 }

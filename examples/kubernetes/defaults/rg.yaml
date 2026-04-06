@@ -1,11 +1,11 @@
 apiVersion: kro.run/v1alpha1
 kind: ResourceGraphDefinition
 metadata:
-  name: somethings.kro.run
+  name: somethings.kro.run2
 spec:
   schema:
     apiVersion: v1alpha1
-    kind: Something
+    kind: Something2
     spec:
       name: string
       elements: '[]string | default=["a","b","c","d"]'

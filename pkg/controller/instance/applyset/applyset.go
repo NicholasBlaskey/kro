@@ -142,7 +142,6 @@ func (m Metadata) Labels() map[string]string {
 	}
 }
 
-
 // Annotations returns the KEP-3659 parent annotations.
 func (m Metadata) Annotations() map[string]string {
 	return map[string]string{
@@ -183,7 +182,7 @@ func New(cfg Config, parent interface {
 	// Label selector will be the new owner-xxx label for new and migrated objects.
 	// Old objects getting migrated to new label will use the part-of applyset label
 	// initially.
-	ownerLabel := OwnerLabelPrefix+applySetID
+	ownerLabel := OwnerLabelPrefix + applySetID
 	labelSelector := fmt.Sprintf("%s=true", ownerLabel)
 	if _, isMigrated := parent.GetAnnotations()[ApplySetMigratedAnnotation]; !isMigrated {
 		labelSelector = fmt.Sprintf("%s=%s", ApplysetPartOfLabel, applySetID)
@@ -260,7 +259,6 @@ func (a *ApplySet) Apply(ctx context.Context, resources []Resource, mode ApplyMo
 		resource Resource
 		mapping  *meta.RESTMapping
 	}, 0, len(resources))
-
 	for _, r := range resources {
 		// SkipApply resources may have nil Object (unresolved), skip entirely
 		if r.SkipApply {
@@ -302,7 +300,7 @@ func (a *ApplySet) Apply(ctx context.Context, resources []Resource, mode ApplyMo
 
 	var mu sync.Mutex
 	applyOptions := metav1.ApplyOptions{
-		FieldManager: FieldManager,
+		FieldManager: fmt.Sprintf("%s-%s", FieldManager, a.applySetID),
 		Force:        true,
 	}
 
@@ -366,7 +364,13 @@ func (a *ApplySet) applyResource(
 
 	// Conflict check using observed state (from controller GET), if provided.
 	var currentApplySetID string
+	appliedObjectCanBeShared := true
+	resourceIsShared := r.Object.GetAnnotations()[OwnershipAnnotation] == SharedOwnershipValue
 	if r.Current != nil {
+		if r.Current.GetAnnotations()[OwnershipAnnotation] != SharedOwnershipValue {
+			appliedObjectCanBeShared = false
+		}
+
 		labels := r.Current.GetLabels()
 		// Check owner-* labels for any conflicts.
 		for key := range labels {
@@ -383,13 +387,18 @@ func (a *ApplySet) applyResource(
 			currentApplySetID = labels[ApplysetPartOfLabel]
 		}
 	}
-	if currentApplySetID != "" && currentApplySetID != a.applySetID {
+
+	isSharedMode := appliedObjectCanBeShared && resourceIsShared
+	if isSharedMode { // Sharable mode. Just set force to false for now.
+		options.Force = false
+	} else if currentApplySetID != "" && currentApplySetID != a.applySetID {
 		item.Error = &ApplySetConflictError{
-			ResourceName:      r.Object.GetName(),
-			ResourceNamespace: r.Object.GetNamespace(),
-			ResourceGVK:       r.Object.GroupVersionKind().String(),
-			CurrentApplySetID: currentApplySetID,
-			DesiredApplySetID: a.applySetID,
+			ResourceName:              r.Object.GetName(),
+			ResourceNamespace:         r.Object.GetNamespace(),
+			ResourceGVK:               r.Object.GroupVersionKind().String(),
+			CurrentApplySetID:         currentApplySetID,
+			DesiredApplySetID:         a.applySetID,
+			AppliedObjectCantBeShared: !appliedObjectCanBeShared && resourceIsShared,
 		}
 		a.log.V(2).Info("applyset conflict (observed state)",
 			"id", r.ID,
@@ -398,6 +407,8 @@ func (a *ApplySet) applyResource(
 			"gvk", r.Object.GroupVersionKind().String(),
 			"existingApplySetID", currentApplySetID,
 			"desiredApplySetID", a.applySetID,
+			"appliedObjectCanBeShared", appliedObjectCanBeShared,
+			"resourceIsShared", resourceIsShared,
 		)
 		return item
 	}
@@ -408,8 +419,10 @@ func (a *ApplySet) applyResource(
 		labels = make(map[string]string)
 	}
 
-	// Add both part-of and an ownership tracking label.
-	labels[ApplysetPartOfLabel] = a.applySetID
+	// Add applyset label if no one else has before, or we previously added it.
+	if !isSharedMode || r.Current == nil || r.Current.GetLabels()[ApplysetPartOfLabel] == a.applySetID {
+		labels[ApplysetPartOfLabel] = a.applySetID
+	}
 	labels[OwnerLabelPrefix+a.applySetID] = "true"
 	r.Object.SetLabels(labels)
 
@@ -570,14 +583,28 @@ func (a *ApplySet) prune(
 
 	for _, c := range candidates {
 		eg.Go(func() error {
-			deleteOpts := metav1.DeleteOptions{
-				Preconditions: &metav1.Preconditions{UID: new(c.obj.GetUID())},
+			hasOtherSharedOwners := false
+			if c.obj.GetAnnotations()[OwnershipAnnotation] == SharedOwnershipValue {
+				for l := range c.obj.GetLabels() {
+					if applysetID, found := strings.CutPrefix(l, OwnerLabelPrefix); found && applysetID != a.applySetID {
+						hasOtherSharedOwners = true
+						break
+					}
+				}
 			}
+
 			var err error
-			if c.obj.GetNamespace() != "" {
-				err = a.client.Resource(c.gvr).Namespace(c.obj.GetNamespace()).Delete(egCtx, c.obj.GetName(), deleteOpts)
+			if hasOtherSharedOwners {
+				err = a.removeOwnerLabel(ctx, c.obj)
 			} else {
-				err = a.client.Resource(c.gvr).Delete(egCtx, c.obj.GetName(), deleteOpts)
+				deleteOpts := metav1.DeleteOptions{
+					Preconditions: &metav1.Preconditions{UID: new(c.obj.GetUID())},
+				}
+				if c.obj.GetNamespace() != "" {
+					err = a.client.Resource(c.gvr).Namespace(c.obj.GetNamespace()).Delete(egCtx, c.obj.GetName(), deleteOpts)
+				} else {
+					err = a.client.Resource(c.gvr).Delete(egCtx, c.obj.GetName(), deleteOpts)
+				}
 			}
 
 			if err != nil {
@@ -686,4 +713,42 @@ func ID(parent interface {
 	hashed := sha256.Sum256([]byte(unencoded))
 	b64 := base64.RawURLEncoding.EncodeToString(hashed[:])
 	return fmt.Sprintf(V1ApplySetIdFormat, b64)
+}
+
+func (a *ApplySet) removeOwnerLabel(ctx context.Context, obj *unstructured.Unstructured) error {
+	// Doing an empty SSA apply will delete all field ownerships and remove those fields if needed.
+	patchObj := instanceSSAPatch(obj)
+
+	gvk := obj.GroupVersionKind()
+	mapping, err := a.restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		return fmt.Errorf("RESTMapping failed for %v: %w", gvk, err)
+	}
+	dynResource := a.resourceClient(mapping, obj.GetNamespace())
+	_, err = dynResource.Apply(ctx, obj.GetName(), patchObj, metav1.ApplyOptions{
+		FieldManager: fmt.Sprintf("%s-%s", FieldManager, a.applySetID),
+		Force:        false,
+	})
+
+	return err
+}
+
+// TODO avoid duplicating this code.
+// instanceSSAPatch returns a minimal unstructured object for SSA patches
+// targeting the instance. For cluster-scoped instances the namespace key is
+// omitted so the API server does not receive an empty string.
+func instanceSSAPatch(obj *unstructured.Unstructured) *unstructured.Unstructured {
+	md := map[string]interface{}{
+		"name": obj.GetName(),
+	}
+	if ns := obj.GetNamespace(); ns != "" {
+		md["namespace"] = ns
+	}
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": obj.GetAPIVersion(),
+			"kind":       obj.GetKind(),
+			"metadata":   md,
+		},
+	}
 }

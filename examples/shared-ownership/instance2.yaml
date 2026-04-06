@@ -1,0 +1,8 @@
+apiVersion: kro.run/v1alpha1
+kind: SharedConfig
+metadata:
+  name: app2-config
+spec:
+  appName: app2
+  config: "port=9090,debug=false"
+  sharedValue: "2026-04-06T10:00:00Z"

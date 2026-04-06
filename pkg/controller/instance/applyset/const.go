@@ -28,22 +28,28 @@ var ErrApplySetConflict = errors.New("resource belongs to a different ApplySet")
 
 // ApplySetConflictError provides details about an ApplySet membership conflict.
 type ApplySetConflictError struct {
-	ResourceName      string
-	ResourceNamespace string
-	ResourceGVK       string
-	CurrentApplySetID string
-	DesiredApplySetID string
+	ResourceName              string
+	ResourceNamespace         string
+	ResourceGVK               string
+	CurrentApplySetID         string
+	DesiredApplySetID         string
+	AppliedObjectCantBeShared bool
 }
 
 func (e *ApplySetConflictError) Error() string {
-	if e.ResourceNamespace != "" {
-		return fmt.Sprintf("%s: %s/%s (%s) belongs to ApplySet %q, cannot reassign to %q",
-			ErrApplySetConflict, e.ResourceNamespace, e.ResourceName, e.ResourceGVK,
-			e.CurrentApplySetID, e.DesiredApplySetID)
+	appliedObjectCantBeSharedError := ""
+	if e.AppliedObjectCantBeShared {
+		appliedObjectCantBeSharedError = ", applied object is not sharable"
 	}
-	return fmt.Sprintf("%s: %s (%s) belongs to ApplySet %q, cannot reassign to %q",
+
+	if e.ResourceNamespace != "" {
+		return fmt.Sprintf("%s: %s/%s (%s) belongs to ApplySet %q, cannot reassign to %q%s",
+			ErrApplySetConflict, e.ResourceNamespace, e.ResourceName, e.ResourceGVK,
+			e.CurrentApplySetID, e.DesiredApplySetID, appliedObjectCantBeSharedError)
+	}
+	return fmt.Sprintf("%s: %s (%s) belongs to ApplySet %q, cannot reassign to %q%s",
 		ErrApplySetConflict, e.ResourceName, e.ResourceGVK,
-		e.CurrentApplySetID, e.DesiredApplySetID)
+		e.CurrentApplySetID, e.DesiredApplySetID, appliedObjectCantBeSharedError)
 }
 
 func (e *ApplySetConflictError) Unwrap() error {
@@ -107,4 +113,12 @@ const (
 
 	// ApplySetMigratedAnnotation Indicates applyset has been migrated to support multiple owners on it.
 	ApplySetMigratedAnnotation = "internal.kro.run/applyset-v2"
+
+	// OwnershipAnnotation is the annotation key that marks a resource as shareable between multiple instances.
+	// When set to SharedOwnershipValue, multiple applysets can manage different fields of the same resource.
+	OwnershipAnnotation = "kro.run/ownership"
+
+	// SharedOwnershipValue is the value for OwnershipAnnotation that enables shared ownership mode.
+	// In shared mode, SSA conflicts are allowed and each applyset manages only its declared fields.
+	SharedOwnershipValue = "shared"
 )

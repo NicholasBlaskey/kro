@@ -455,7 +455,7 @@ func (c *Controller) patchInstanceWithMigratedAnnotation(rcx *ReconcileContext) 
 		inst.GetName(),
 		patchObj,
 		metav1.ApplyOptions{
-			FieldManager: applyset.FieldManager + "-parent",
+			FieldManager: applyset.FieldManager + "-migrated-annotation",
 			Force:        true,
 		},
 	)

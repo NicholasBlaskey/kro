@@ -1,0 +1,28 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: sharedconfigs.kro.run
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: SharedConfig
+    spec:
+      appName: string
+      config: string
+      sharedValue: string
+  resources:
+    - id: sharedConfigmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: shared-app-config
+          namespace: default
+          annotations:
+            kro.run/ownership: shared
+        data:
+          # Each instance conditionally writes its own key
+          app1: '${schema.spec.appName == "app1" ? schema.spec.config : ""}'
+          app2: '${schema.spec.appName == "app2" ? schema.spec.config : ""}'
+          # Both instances write to the same shared key (SSA resolves conflicts)
+          shared.timestamp: ${schema.spec.sharedValue}
