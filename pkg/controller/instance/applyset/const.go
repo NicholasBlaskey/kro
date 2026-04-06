@@ -97,4 +97,14 @@ const (
 	// ApplysetPartOfLabel is the key of the label which indicates that the object is a member of an ApplySet.
 	// The value of the label MUST match the value of ApplySetParentIDLabel on the parent object.
 	ApplysetPartOfLabel = "applyset.kubernetes.io/part-of"
+
+	// OwnerLabelPrefix is the prefix for owner tracking labels.
+	// Format: kro.run/owner-{applySetID}=true
+	// This label is used as the primary selector for listing/pruning resources in an ApplySet,
+	// replacing applyset.kubernetes.io/part-of for listing to enable multi-instance ownership
+	// tracking. Both labels are set on applied resources for KEP-3659 compliance and flexibility.
+	OwnerLabelPrefix = "kro.run/owner-"
+
+	// ApplySetMigratedAnnotation Indicates applyset has been migrated to support multiple owners on it.
+	ApplySetMigratedAnnotation = "internal.kro.run/applyset-v2"
 )

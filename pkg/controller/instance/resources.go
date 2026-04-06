@@ -85,6 +85,10 @@ func (c *Controller) reconcileNodes(rcx *ReconcileContext) error {
 	if err := c.pruneIfSafe(rcx, r); err != nil {
 		return err
 	}
+	if err := c.patchInstanceWithMigratedAnnotation(rcx); err != nil {
+		return err
+	}
+
 	return c.finalizeState(rcx, r)
 }
 
@@ -421,6 +425,30 @@ func (c *Controller) patchInstanceWithApplySetMetadata(rcx *ReconcileContext, me
 	patchObj := instanceSSAPatch(inst)
 	patchObj.SetLabels(meta.Labels())
 	patchObj.SetAnnotations(meta.Annotations())
+
+	_, err := rcx.InstanceClient().Apply(
+		rcx.Ctx,
+		inst.GetName(),
+		patchObj,
+		metav1.ApplyOptions{
+			FieldManager: applyset.FieldManager + "-parent",
+			Force:        true,
+		},
+	)
+	return err
+}
+
+// patchInstanceWithMigratedAnnotation adds an annotation to signal we can start using new label selector format.
+func (c *Controller) patchInstanceWithMigratedAnnotation(rcx *ReconcileContext) error {
+	inst := rcx.Instance
+	if _, ok := inst.GetAnnotations()[applyset.ApplySetMigratedAnnotation]; ok {
+		return nil
+	}
+
+	patchObj := instanceSSAPatch(inst)
+	patchObj.SetAnnotations(map[string]string{
+		applyset.ApplySetMigratedAnnotation: "true",
+	})
 
 	_, err := rcx.InstanceClient().Apply(
 		rcx.Ctx,

@@ -512,7 +512,7 @@ func TestPrune(t *testing.T) {
 	}
 	applySetID := ID(parent)
 
-	// Create an orphan ConfigMap with the applyset label
+	// Create an orphan ConfigMap with the part-of label
 	orphan := newConfigMap("orphan-cm", "default")
 	orphan.SetLabels(map[string]string{
 		ApplysetPartOfLabel: applySetID,
@@ -1070,7 +1070,7 @@ func TestPrune_ClusterScopedResource(t *testing.T) {
 	})
 	applySetID := ID(parent)
 
-	// Create an orphan cluster-scoped Namespace with the applyset label
+	// Create an orphan cluster-scoped Namespace with the part-of label
 	orphanNS := newNamespace("orphan-ns")
 	orphanNS.SetLabels(map[string]string{
 		ApplysetPartOfLabel: applySetID,
@@ -1132,6 +1132,276 @@ func TestPrune_ClusterScopedResource(t *testing.T) {
 
 	if len(pruneResult.Pruned) > 0 && pruneResult.Pruned[0].Object.GetName() != "orphan-ns" {
 		t.Errorf("Pruned wrong resource: got %q, want %q", pruneResult.Pruned[0].Object.GetName(), "orphan-ns")
+	}
+}
+
+func TestPrune_NonMigratedParentUsesPartOfSelector(t *testing.T) {
+	ctx := t.Context()
+	mapper := newTestRESTMapper()
+
+	// Parent without migration annotation
+	parent := &testParent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-instance",
+			Namespace: "default",
+			UID:       types.UID("test-parent-uid"),
+			Annotations: map[string]string{
+				ApplySetGKsAnnotation:                  "ConfigMap",
+				ApplySetAdditionalNamespacesAnnotation: "default",
+				// NO ApplySetMigratedAnnotation - should use old part-of selector
+			},
+		},
+		gvk: schema.GroupVersionKind{Group: "kro.run", Version: "v1alpha1", Kind: "TestKind"},
+	}
+	applySetID := ID(parent)
+
+	// Orphan with only OLD part-of label
+	orphan := newConfigMap("orphan-cm", "default")
+	orphan.SetLabels(map[string]string{
+		ApplysetPartOfLabel: applySetID,
+	})
+	orphan.SetUID(types.UID("orphan-uid"))
+
+	client := newFakeDynamicClient(orphan)
+	addSSAReactor(client)
+
+	applier := New(Config{
+		Client:          client,
+		RESTMapper:      mapper,
+		Log:             logr.Discard(),
+		ParentNamespace: "default",
+	}, parent)
+
+	// Apply some other resource
+	resources := []Resource{
+		{ID: "cm1", Object: newConfigMap("cm1", "default")},
+	}
+	result, _, err := applier.Apply(ctx, resources, ApplyMode{})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	// Prune orphans
+	meta, err := applier.Project(resources)
+	if err != nil {
+		t.Fatalf("Project() error = %v", err)
+	}
+	pruneResult, err := applier.Prune(ctx, PruneOptions{
+		KeepUIDs: result.ObservedUIDs(),
+		Scope:    meta.PruneScope(),
+	})
+	if err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+
+	// Verify orphan was pruned (old selector found it)
+	if len(pruneResult.Pruned) != 1 {
+		t.Errorf("expected 1 pruned resource, got %d", len(pruneResult.Pruned))
+	}
+	if len(pruneResult.Pruned) > 0 && pruneResult.Pruned[0].Object.GetName() != "orphan-cm" {
+		t.Errorf("pruned wrong resource: got %q, want %q", pruneResult.Pruned[0].Object.GetName(), "orphan-cm")
+	}
+}
+
+func TestPrune_MigratedParentUsesOwnerSelector(t *testing.T) {
+	ctx := t.Context()
+	mapper := newTestRESTMapper()
+
+	// Parent with migration annotation
+	parent := &testParent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-instance",
+			Namespace: "default",
+			UID:       types.UID("test-parent-uid"),
+			Annotations: map[string]string{
+				ApplySetGKsAnnotation:                  "ConfigMap",
+				ApplySetAdditionalNamespacesAnnotation: "default",
+				ApplySetMigratedAnnotation:             "true",
+			},
+		},
+		gvk: schema.GroupVersionKind{Group: "kro.run", Version: "v1alpha1", Kind: "TestKind"},
+	}
+	applySetID := ID(parent)
+
+	// Orphan with only NEW owner-* label
+	orphan := newConfigMap("orphan-cm", "default")
+	orphan.SetLabels(map[string]string{
+		OwnerLabelPrefix + applySetID: "true",
+	})
+	orphan.SetUID(types.UID("orphan-uid"))
+
+	client := newFakeDynamicClient(orphan)
+	addSSAReactor(client)
+
+	applier := New(Config{
+		Client:          client,
+		RESTMapper:      mapper,
+		Log:             logr.Discard(),
+		ParentNamespace: "default",
+	}, parent)
+
+	// Apply some other resource
+	resources := []Resource{
+		{ID: "cm1", Object: newConfigMap("cm1", "default")},
+	}
+	result, _, err := applier.Apply(ctx, resources, ApplyMode{})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	// Prune orphans
+	meta, err := applier.Project(resources)
+	if err != nil {
+		t.Fatalf("Project() error = %v", err)
+	}
+	pruneResult, err := applier.Prune(ctx, PruneOptions{
+		KeepUIDs: result.ObservedUIDs(),
+		Scope:    meta.PruneScope(),
+	})
+	if err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+
+	// Verify orphan was pruned (new selector found it)
+	if len(pruneResult.Pruned) != 1 {
+		t.Errorf("expected 1 pruned resource, got %d", len(pruneResult.Pruned))
+	}
+	if len(pruneResult.Pruned) > 0 && pruneResult.Pruned[0].Object.GetName() != "orphan-cm" {
+		t.Errorf("pruned wrong resource: got %q, want %q", pruneResult.Pruned[0].Object.GetName(), "orphan-cm")
+	}
+}
+
+func TestPrune_MigratedParentIgnoresPartOfLabel(t *testing.T) {
+	ctx := t.Context()
+	mapper := newTestRESTMapper()
+
+	// Parent with migration annotation
+	parent := &testParent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-instance",
+			Namespace: "default",
+			UID:       types.UID("test-parent-uid"),
+			Annotations: map[string]string{
+				ApplySetGKsAnnotation:                  "ConfigMap",
+				ApplySetAdditionalNamespacesAnnotation: "default",
+				ApplySetMigratedAnnotation:             "true",
+			},
+		},
+		gvk: schema.GroupVersionKind{Group: "kro.run", Version: "v1alpha1", Kind: "TestKind"},
+	}
+	applySetID := ID(parent)
+
+	// Orphan with ONLY old part-of label (never got re-applied during migration)
+	orphan := newConfigMap("orphan-cm", "default")
+	orphan.SetLabels(map[string]string{
+		ApplysetPartOfLabel: applySetID,
+	})
+	orphan.SetUID(types.UID("orphan-uid"))
+
+	client := newFakeDynamicClient(orphan)
+	addSSAReactor(client)
+
+	applier := New(Config{
+		Client:          client,
+		RESTMapper:      mapper,
+		Log:             logr.Discard(),
+		ParentNamespace: "default",
+	}, parent)
+
+	// Apply some other resource
+	resources := []Resource{
+		{ID: "cm1", Object: newConfigMap("cm1", "default")},
+	}
+	result, _, err := applier.Apply(ctx, resources, ApplyMode{})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	// Prune orphans
+	meta, err := applier.Project(resources)
+	if err != nil {
+		t.Fatalf("Project() error = %v", err)
+	}
+	pruneResult, err := applier.Prune(ctx, PruneOptions{
+		KeepUIDs: result.ObservedUIDs(),
+		Scope:    meta.PruneScope(),
+	})
+	if err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+
+	// Verify orphan was NOT pruned (new selector doesn't find old-label-only resources)
+	if len(pruneResult.Pruned) != 0 {
+		t.Errorf("expected 0 pruned resources (old label not found by new selector), got %d", len(pruneResult.Pruned))
+	}
+}
+
+func TestPrune_BothLabelsPresent(t *testing.T) {
+	ctx := t.Context()
+	mapper := newTestRESTMapper()
+
+	// Parent with migration annotation
+	parent := &testParent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-instance",
+			Namespace: "default",
+			UID:       types.UID("test-parent-uid"),
+			Annotations: map[string]string{
+				ApplySetGKsAnnotation:                  "ConfigMap",
+				ApplySetAdditionalNamespacesAnnotation: "default",
+				ApplySetMigratedAnnotation:             "true",
+			},
+		},
+		gvk: schema.GroupVersionKind{Group: "kro.run", Version: "v1alpha1", Kind: "TestKind"},
+	}
+	applySetID := ID(parent)
+
+	// Orphan with BOTH labels (as applied by current code)
+	orphan := newConfigMap("orphan-cm", "default")
+	orphan.SetLabels(map[string]string{
+		ApplysetPartOfLabel:           applySetID,
+		OwnerLabelPrefix + applySetID: "true",
+	})
+	orphan.SetUID(types.UID("orphan-uid"))
+
+	client := newFakeDynamicClient(orphan)
+	addSSAReactor(client)
+
+	applier := New(Config{
+		Client:          client,
+		RESTMapper:      mapper,
+		Log:             logr.Discard(),
+		ParentNamespace: "default",
+	}, parent)
+
+	// Apply some other resource
+	resources := []Resource{
+		{ID: "cm1", Object: newConfigMap("cm1", "default")},
+	}
+	result, _, err := applier.Apply(ctx, resources, ApplyMode{})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	// Prune orphans
+	meta, err := applier.Project(resources)
+	if err != nil {
+		t.Fatalf("Project() error = %v", err)
+	}
+	pruneResult, err := applier.Prune(ctx, PruneOptions{
+		KeepUIDs: result.ObservedUIDs(),
+		Scope:    meta.PruneScope(),
+	})
+	if err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+
+	// Verify orphan was pruned (new selector finds it since it has the new label)
+	if len(pruneResult.Pruned) != 1 {
+		t.Errorf("expected 1 pruned resource, got %d", len(pruneResult.Pruned))
+	}
+	if len(pruneResult.Pruned) > 0 && pruneResult.Pruned[0].Object.GetName() != "orphan-cm" {
+		t.Errorf("pruned wrong resource: got %q, want %q", pruneResult.Pruned[0].Object.GetName(), "orphan-cm")
 	}
 }
 

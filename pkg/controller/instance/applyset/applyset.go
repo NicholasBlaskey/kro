@@ -142,6 +142,7 @@ func (m Metadata) Labels() map[string]string {
 	}
 }
 
+
 // Annotations returns the KEP-3659 parent annotations.
 func (m Metadata) Annotations() map[string]string {
 	return map[string]string{
@@ -178,12 +179,22 @@ func New(cfg Config, parent interface {
 },
 ) *ApplySet {
 	applySetID := ID(parent)
+
+	// Label selector will be the new owner-xxx label for new and migrated objects.
+	// Old objects getting migrated to new label will use the part-of applyset label
+	// initially.
+	ownerLabel := OwnerLabelPrefix+applySetID
+	labelSelector := fmt.Sprintf("%s=true", ownerLabel)
+	if _, isMigrated := parent.GetAnnotations()[ApplySetMigratedAnnotation]; !isMigrated {
+		labelSelector = fmt.Sprintf("%s=%s", ApplysetPartOfLabel, applySetID)
+	}
+
 	return &ApplySet{
 		client:            cfg.Client,
 		restMapper:        cfg.RESTMapper,
 		log:               cfg.Log,
 		applySetID:        applySetID,
-		labelSelector:     fmt.Sprintf("%s=%s", ApplysetPartOfLabel, applySetID),
+		labelSelector:     labelSelector,
 		parentNamespace:   cfg.ParentNamespace,
 		parentAnnotations: maps.Clone(parent.GetAnnotations()),
 	}
@@ -356,7 +367,21 @@ func (a *ApplySet) applyResource(
 	// Conflict check using observed state (from controller GET), if provided.
 	var currentApplySetID string
 	if r.Current != nil {
-		currentApplySetID = r.Current.GetLabels()[ApplysetPartOfLabel]
+		labels := r.Current.GetLabels()
+		// Check owner-* labels for any conflicts.
+		for key := range labels {
+			if strings.HasPrefix(key, OwnerLabelPrefix) {
+				ownerID := strings.TrimPrefix(key, OwnerLabelPrefix)
+				if ownerID != a.applySetID {
+					currentApplySetID = ownerID
+					break
+				}
+			}
+		}
+		// Also check part-of for resources from migration case.
+		if currentApplySetID == "" {
+			currentApplySetID = labels[ApplysetPartOfLabel]
+		}
 	}
 	if currentApplySetID != "" && currentApplySetID != a.applySetID {
 		item.Error = &ApplySetConflictError{
@@ -377,13 +402,15 @@ func (a *ApplySet) applyResource(
 		return item
 	}
 
-	// Inject applyset membership label (required for prune to find managed resources)
+	// Inject tracking labels
 	labels := r.Object.GetLabels()
 	if labels == nil {
 		labels = make(map[string]string)
 	}
 
+	// Add both part-of and an ownership tracking label.
 	labels[ApplysetPartOfLabel] = a.applySetID
+	labels[OwnerLabelPrefix+a.applySetID] = "true"
 	r.Object.SetLabels(labels)
 
 	// Desired reflects what we're actually sending (with label injected)
