@@ -69,10 +69,18 @@ func (c *Controller) processCollectionNode(
 	// Register a single collection watch for the forEach node. The selector
 	// matches all items owned by this instance + node, which is the same
 	// selector listCollectionItems uses to LIST them.
-	selector := labels.SelectorFromSet(labels.Set{
-		metadata.InstanceIDLabel: string(rcx.Instance.GetUID()),
-		metadata.NodeIDLabel:     id,
-	})
+	instanceUID := string(rcx.Instance.GetUID())
+	isMigrated := rcx.Instance.GetAnnotations()[applyset.ApplySetMigratedAnnotation] != ""
+
+	labelSet := labels.Set{metadata.NodeIDLabel: id}
+	if isMigrated {
+		// Use owner-specific label format
+		labelSet[metadata.InstanceIDLabel+"-"+instanceUID] = "true"
+	} else {
+		// Use legacy label format
+		labelSet[metadata.InstanceIDLabel] = instanceUID
+	}
+	selector := labels.SelectorFromSet(labelSet)
 	requestCollectionWatch(rcx, id, gvr, rcx.Instance.GetNamespace(), selector)
 
 	for _, expandedResource := range expandedResources {
@@ -95,13 +103,13 @@ func (c *Controller) processCollectionNode(
 	// Build resources list for apply
 	resources := make([]applyset.Resource, 0, collectionSize)
 	for i, expandedResource := range expandedResources {
-		// Apply decorator labels with collection info
-		collectionInfo := &CollectionInfo{Index: i, Size: collectionSize}
-		c.applyDecoratorLabels(rcx, expandedResource, id, collectionInfo)
-
 		// Look up current revision from LIST results
 		key := expandedResource.GetNamespace() + "/" + expandedResource.GetName()
 		current := existingByKey[key]
+
+		// Apply decorator labels with collection info
+		collectionInfo := &CollectionInfo{Index: i, Size: collectionSize}
+		c.applyDecoratorLabels(rcx, expandedResource, current, id, collectionInfo)
 
 		expandedID := fmt.Sprintf("%s-%d", id, i)
 		resources = append(resources, applyset.Resource{
@@ -123,8 +131,21 @@ func (c *Controller) listCollectionItems(
 ) ([]*unstructured.Unstructured, error) {
 	// Filter by both instance UID and node ID for precise matching
 	instanceUID := string(rcx.Instance.GetUID())
-	selector := fmt.Sprintf("%s=%s,%s=%s",
-		metadata.InstanceIDLabel, instanceUID,
+
+	// Check if migrated to new label format
+	isMigrated := rcx.Instance.GetAnnotations()[applyset.ApplySetMigratedAnnotation] != ""
+
+	var instanceSelector string
+	if isMigrated {
+		// Use owner-specific label format
+		instanceSelector = fmt.Sprintf("%s-%s=true", metadata.InstanceIDLabel, instanceUID)
+	} else {
+		// Use legacy label format
+		instanceSelector = fmt.Sprintf("%s=%s", metadata.InstanceIDLabel, instanceUID)
+	}
+
+	selector := fmt.Sprintf("%s,%s=%s",
+		instanceSelector,
 		metadata.NodeIDLabel, nodeID,
 	)
 

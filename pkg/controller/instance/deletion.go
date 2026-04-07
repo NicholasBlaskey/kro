@@ -120,11 +120,22 @@ func (c *Controller) planNodesForDeletion(
 				state.SetError(err)
 				return nil, fmt.Errorf("failed to list collection items for %s: %w", rid, err)
 			}
-			if len(items) == 0 {
+
+			// Filter out items we no longer own (relevant for shared resources).
+			applySetID := applyset.ID(rcx.Instance)
+			ownerLabel := applyset.OwnerLabelPrefix + applySetID
+			ownedItems := make([]*unstructured.Unstructured, 0, len(items))
+			for _, item := range items {
+				if _, stillOwned := item.GetLabels()[ownerLabel]; stillOwned {
+					ownedItems = append(ownedItems, item)
+				}
+			}
+
+			if len(ownedItems) == 0 {
 				state.SetDeleted()
 				continue
 			}
-			node.SetObserved(items)
+			node.SetObserved(ownedItems)
 			state.SetInProgress()
 			deletionNode = node
 
@@ -142,6 +153,16 @@ func (c *Controller) planNodesForDeletion(
 				state.SetError(err)
 				return nil, err
 			}
+
+			// Check if we still own this resource (relevant for shared resources).
+			// If ownership was released, treat as deleted from our perspective.
+			applySetID := applyset.ID(rcx.Instance)
+			ownerLabel := applyset.OwnerLabelPrefix + applySetID
+			if _, stillOwned := observed.GetLabels()[ownerLabel]; !stillOwned {
+				state.SetDeleted()
+				continue
+			}
+
 			node.SetObserved([]*unstructured.Unstructured{observed})
 			state.SetInProgress()
 			deletionNode = node

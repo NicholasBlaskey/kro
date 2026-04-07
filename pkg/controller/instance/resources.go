@@ -364,7 +364,7 @@ func (c *Controller) processRegularNode(
 	}
 
 	// Apply decorator labels to desired object
-	c.applyDecoratorLabels(rcx, desired, id, nil)
+	c.applyDecoratorLabels(rcx, desired, current, id, nil)
 
 	resource := applyset.Resource{
 		ID:      id,
@@ -379,6 +379,7 @@ func (c *Controller) processRegularNode(
 func (c *Controller) applyDecoratorLabels(
 	rcx *ReconcileContext,
 	obj *unstructured.Unstructured,
+	current *unstructured.Unstructured,
 	nodeID string,
 	collectionInfo *CollectionInfo,
 ) {

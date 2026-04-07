@@ -424,6 +424,10 @@ func (a *ApplySet) applyResource(
 		labels[ApplysetPartOfLabel] = a.applySetID
 	}
 	labels[OwnerLabelPrefix+a.applySetID] = "true"
+
+	// Apply same pattern to instance labels: always add owner-specific, conditionally add legacy
+	a.applyInstanceOwnerLabels(labels, r.Current)
+
 	r.Object.SetLabels(labels)
 
 	// Desired reflects what we're actually sending (with label injected)
@@ -713,6 +717,32 @@ func ID(parent interface {
 	hashed := sha256.Sum256([]byte(unencoded))
 	b64 := base64.RawURLEncoding.EncodeToString(hashed[:])
 	return fmt.Sprintf(V1ApplySetIdFormat, b64)
+}
+
+// applyInstanceOwnerLabels applies instance labels using the same pattern as applyset labels:
+// - Always add owner-specific labels (kro.run/instance-id-{value}=true)
+// - Only add legacy labels (kro.run/instance-id={value}) if no one else owns them
+func (a *ApplySet) applyInstanceOwnerLabels(labels map[string]string, current *unstructured.Unstructured) {
+	instanceLabels := []string{
+		"kro.run/instance-id",
+		"kro.run/instance-name",
+		"kro.run/instance-namespace",
+		"kro.run/instance-group",
+		"kro.run/instance-version",
+		"kro.run/instance-kind",
+	}
+
+	for _, labelKey := range instanceLabels {
+		if labelValue, exists := labels[labelKey]; exists {
+			// Only keep legacy label if we're first or we previously owned it
+			if current != nil && current.GetLabels()[labelKey] != "" && current.GetLabels()[labelKey] != labelValue {
+				// Someone else owns the legacy label, remove it
+				delete(labels, labelKey)
+			}
+			// Always add owner-specific label
+			labels[labelKey+"-"+labelValue] = "true"
+		}
+	}
 }
 
 func (a *ApplySet) removeOwnerLabel(ctx context.Context, obj *unstructured.Unstructured) error {
