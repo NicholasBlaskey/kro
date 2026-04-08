@@ -25,6 +25,7 @@ import (
 
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 	"github.com/kubernetes-sigs/kro/pkg/metadata"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // cleanupResourceGraphDefinition handles the deletion of a ResourceGraphDefinition by shutting down its associated
@@ -35,9 +36,22 @@ import (
 func (r *ResourceGraphDefinitionReconciler) cleanupResourceGraphDefinition(ctx context.Context, rgd *v1alpha1.ResourceGraphDefinition) error {
 	ctrl.LoggerFrom(ctx).V(1).Info("cleaning up resource graph definition", "name", rgd.Name)
 
-	// shutdown microcontroller
-	if err := r.shutdownResourceGraphDefinitionMicroController(ctx, new(metadata.GetResourceGraphDefinitionInstanceGVR(rgd.Spec.Schema.Group, rgd.Spec.Schema.APIVersion, rgd.Spec.Schema.Kind))); err != nil {
-		return fmt.Errorf("failed to shutdown microcontroller: %w", err)
+	controllerWasReady := false
+	for _, cond := range rgd.Status.Conditions {
+		if cond.Type.String() == ControllerReady && cond.Status == metav1.ConditionTrue {
+			controllerWasReady = true
+		}
+	}
+
+	// shutdown microcontroller if we ever registered it.
+	// Note this needed to make sure we don't shut down another
+	// RGD's microcontroller, if we delete a RGD that failed due to a CRD conflict.
+	if controllerWasReady {
+		if err := r.shutdownResourceGraphDefinitionMicroController(ctx, new(metadata.GetResourceGraphDefinitionInstanceGVR(rgd.Spec.Schema.Group, rgd.Spec.Schema.APIVersion, rgd.Spec.Schema.Kind))); err != nil {
+			return fmt.Errorf("failed to shutdown microcontroller: %w", err)
+		}
+	} else {
+		ctrl.LoggerFrom(ctx).V(1).Info("avoiding cleaning up controller for rgd, since it never successfully created it", "name", rgd.Name)
 	}
 
 	// Registry eviction is NOT done here. The GraphRevision controller evicts
