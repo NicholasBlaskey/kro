@@ -169,6 +169,18 @@ func (c *Controller) deleteTarget(
 	node *runtime.Node,
 	state *NodeState,
 ) error {
+	// Check if the resource should be retained based on its lifecycle policy
+	shouldRetain, err := node.ShouldRetain()
+	if err != nil {
+		state.SetError(err)
+		return err
+	}
+	if shouldRetain {
+		rcx.Log.Info("Retaining resource due to lifecycle policy", "resource", node.Spec.Meta.ID)
+		state.SetDeleted()
+		return nil
+	}
+
 	targets, err := node.DeleteTargets()
 	if err != nil {
 		state.SetError(err)

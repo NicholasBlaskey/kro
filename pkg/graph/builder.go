@@ -487,6 +487,22 @@ func (b *Builder) buildRGResource(
 		return nil, nil, fmt.Errorf("failed to parse forEach dimensions: %v", err)
 	}
 
+	// 10. Parse lifecycle expression
+	var lifecycleExpr *krocel.Expression
+	if len(rgResource.Lifecycle.Raw) > 0 {
+		var lifecycleStr string
+		if err := yaml.Unmarshal(rgResource.Lifecycle.Raw, &lifecycleStr); err != nil {
+			return nil, nil, fmt.Errorf("failed to unmarshal lifecycle for resource %s: %w", rgResource.ID, err)
+		}
+		lifecycleExprs, err := parser.ParseConditionExpressions([]string{lifecycleStr})
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to parse lifecycle expression for resource %s: %w", rgResource.ID, err)
+		}
+		if len(lifecycleExprs) > 0 {
+			lifecycleExpr = lifecycleExprs[0]
+		}
+	}
+
 	// Determine node type.
 	nodeType := NodeTypeResource
 	if rgResource.ExternalRef != nil {
@@ -514,6 +530,7 @@ func (b *Builder) buildRGResource(
 		IncludeWhen: includeWhen,
 		ReadyWhen:   readyWhen,
 		ForEach:     forEachDimensions,
+		Lifecycle:   lifecycleExpr,
 	}
 	return node, resourceSchema, nil
 }

@@ -129,6 +129,9 @@ func BaseDeclarations() []cel.EnvOption {
 			// (includeWhen, readyWhen, forEach) via inspectExpressionRestricted
 			// and validateAndCompileForEach.
 			library.Omit(),
+			// Policy() provides lifecycle policy builder functions for managing
+			// resource lifecycle behavior (e.g., retention on deletion).
+			library.Policy(),
 		}
 	})
 	return cachedBaseDeclarations
