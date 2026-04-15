@@ -490,16 +490,33 @@ func (b *Builder) buildRGResource(
 	// 10. Parse lifecycle expression
 	var lifecycleExpr *krocel.Expression
 	if len(rgResource.Lifecycle.Raw) > 0 {
+		// Try to unmarshal as a string first (CEL expression like "${policy()}")
 		var lifecycleStr string
-		if err := yaml.Unmarshal(rgResource.Lifecycle.Raw, &lifecycleStr); err != nil {
-			return nil, nil, fmt.Errorf("failed to unmarshal lifecycle for resource %s: %w", rgResource.ID, err)
-		}
-		lifecycleExprs, err := parser.ParseConditionExpressions([]string{lifecycleStr})
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to parse lifecycle expression for resource %s: %w", rgResource.ID, err)
-		}
-		if len(lifecycleExprs) > 0 {
-			lifecycleExpr = lifecycleExprs[0]
+		if err := yaml.Unmarshal(rgResource.Lifecycle.Raw, &lifecycleStr); err == nil {
+			// It's a CEL expression string
+			lifecycleExprs, err := parser.ParseConditionExpressions([]string{lifecycleStr})
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to parse lifecycle expression for resource %s: %w", rgResource.ID, err)
+			}
+			if len(lifecycleExprs) > 0 {
+				lifecycleExpr = lifecycleExprs[0]
+			}
+		} else {
+			// It's a direct map object (like {deletePolicy: retain}), unmarshal as map
+			lifecycleMap := map[string]interface{}{}
+			if err := yaml.Unmarshal(rgResource.Lifecycle.Raw, &lifecycleMap); err != nil {
+				return nil, nil, fmt.Errorf("failed to unmarshal lifecycle map for resource %s: %w", rgResource.ID, err)
+			}
+			// Validate the lifecycle map structure
+			if err := validateLifecycleMap(lifecycleMap); err != nil {
+				return nil, nil, fmt.Errorf("invalid lifecycle map for resource %s: %w", rgResource.ID, err)
+			}
+			// Convert map to CEL map literal
+			celLiteral, err := mapToCELLiteral(lifecycleMap)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to convert lifecycle map to CEL for resource %s: %w", rgResource.ID, err)
+			}
+			lifecycleExpr = &krocel.Expression{Original: celLiteral}
 		}
 	}
 
@@ -1125,6 +1142,7 @@ func lookupSchemaAtField(c *schema.Cache, s *spec.Schema, field string) *spec.Sc
 // - Template expressions (resource field values)
 // - includeWhen expressions (conditional resource creation)
 // - readyWhen expressions (resource readiness conditions)
+// - lifecycle expression (resource deletion policy)
 //
 // Uses the shared inspectorEnv for AST inspection and typed env for compilation.
 func validateAndCompileNode(bc *buildContext, node *Node, inspector *ast.Inspector, nodeSchema *spec.Schema) error {
@@ -1189,6 +1207,20 @@ func validateAndCompileNode(bc *buildContext, node *Node, inspector *ast.Inspect
 
 		if err := validateAndCompileReadyWhen(bc, readyEnv, node); err != nil {
 			return err
+		}
+	}
+
+	// Validate and compile lifecycle expression if present
+	if node.Lifecycle != nil {
+		// lifecycle expressions can reference schema plus any resource dependency
+		allowedVars := append([]string{SchemaVarName}, node.Meta.Dependencies...)
+		if _, err := inspectExpressionRestricted(inspector, node.Lifecycle.Original, allowedVars); err != nil {
+			return fmt.Errorf("resource %q lifecycle: %w", node.Meta.ID, err)
+		}
+
+		// Compile lifecycle using the shared typed environment
+		if _, err := bc.compile(bc.env, node.Lifecycle); err != nil {
+			return fmt.Errorf("resource %q: failed to compile lifecycle expression: %w", node.Meta.ID, err)
 		}
 	}
 
@@ -1408,4 +1440,61 @@ func collectNodeSchemas(c *schema.Cache, nodes map[string]*Node, nodeSchemas map
 		}
 	}
 	return result
+}
+
+// validateLifecycleMap validates that a lifecycle map has valid structure and values.
+func validateLifecycleMap(lifecycleMap map[string]interface{}) error {
+	// Empty map is valid
+	if len(lifecycleMap) == 0 {
+		return nil
+	}
+
+	// Check for unknown fields
+	validFields := map[string]bool{
+		"deletePolicy": true,
+	}
+	for key := range lifecycleMap {
+		if !validFields[key] {
+			return fmt.Errorf("unknown field %q, valid fields are: deletePolicy", key)
+		}
+	}
+
+	// Validate deletePolicy if present
+	if deletePolicy, ok := lifecycleMap["deletePolicy"]; ok {
+		deletePolicyStr, ok := deletePolicy.(string)
+		if !ok {
+			return fmt.Errorf("deletePolicy must be a string, got %T", deletePolicy)
+		}
+		if deletePolicyStr != "retain" && deletePolicyStr != "delete" {
+			return fmt.Errorf("deletePolicy must be either \"retain\" or \"delete\", got %q", deletePolicyStr)
+		}
+	}
+
+	return nil
+}
+
+// mapToCELLiteral converts a map[string]interface{} to a CEL map literal string.
+func mapToCELLiteral(m map[string]interface{}) (string, error) {
+	// Empty map
+	if len(m) == 0 {
+		return "{}", nil
+	}
+
+	// Build CEL map literal
+	pairs := make([]string, 0, len(m))
+	for key, value := range m {
+		var valueStr string
+		switch v := value.(type) {
+		case string:
+			valueStr = fmt.Sprintf("%q", v)
+		case bool:
+			valueStr = fmt.Sprintf("%t", v)
+		case int, int64, float64:
+			valueStr = fmt.Sprintf("%v", v)
+		default:
+			return "", fmt.Errorf("unsupported value type %T for key %q", value, key)
+		}
+		pairs = append(pairs, fmt.Sprintf("%q: %s", key, valueStr))
+	}
+	return "{" + strings.Join(pairs, ", ") + "}", nil
 }
