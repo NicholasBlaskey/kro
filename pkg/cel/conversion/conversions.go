@@ -74,6 +74,10 @@ func GoNativeType(v ref.Val) (interface{}, error) {
 		if _, ok := v.Value().(sentinels.Omit); ok {
 			return sentinels.Omit{}, nil
 		}
+		// Try converting to a map if possible (for custom types that wrap maps)
+		if mapper, ok := v.(traits.Mapper); ok {
+			return convertMap(mapper)
+		}
 		// For types we can't convert, return as is with an error
 		return v.Value(), fmt.Errorf("%w: %v", ErrUnsupportedType, v.Type())
 	}

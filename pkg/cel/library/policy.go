@@ -44,40 +44,40 @@ func (l *policyLib) LibraryName() string {
 }
 
 func (l *policyLib) CompileOptions() []cel.EnvOption {
-	mapType := cel.MapType(cel.StringType, cel.DynType)
+	policyType := cel.ObjectType("kro.Policy")
 	return []cel.EnvOption{
 		cel.Function("policy",
 			cel.Overload("policy_void",
 				[]*cel.Type{},
-				mapType,
+				policyType,
 				cel.FunctionBinding(func(args ...ref.Val) ref.Val {
-					return types.NewMutableMap(types.DefaultTypeAdapter, make(map[ref.Val]ref.Val)).ToImmutableMap()
+					return newPolicyValue("")
 				}),
 			),
 		),
 		cel.Function("withRetain",
-			cel.MemberOverload("map_withRetain",
-				[]*cel.Type{mapType},
-				mapType,
+			cel.MemberOverload("policy_withRetain",
+				[]*cel.Type{policyType},
+				policyType,
 				cel.UnaryBinding(func(val ref.Val) ref.Val {
-					m, ok := val.(traits.Mapper)
+					p, ok := val.(*policyValue)
 					if !ok {
-						return types.NewErr("withRetain() can only be called on a map")
+						return types.NewErr("withRetain() can only be called on a Policy")
 					}
-					return withDeletePolicy(m, "retain")
+					return p.withDeletePolicy("retain")
 				}),
 			),
 		),
 		cel.Function("withDelete",
-			cel.MemberOverload("map_withDelete",
-				[]*cel.Type{mapType},
-				mapType,
+			cel.MemberOverload("policy_withDelete",
+				[]*cel.Type{policyType},
+				policyType,
 				cel.UnaryBinding(func(val ref.Val) ref.Val {
-					m, ok := val.(traits.Mapper)
+					p, ok := val.(*policyValue)
 					if !ok {
-						return types.NewErr("withDelete() can only be called on a map")
+						return types.NewErr("withDelete() can only be called on a Policy")
 					}
-					return withDeletePolicy(m, "delete")
+					return p.withDeletePolicy("delete")
 				}),
 			),
 		),
@@ -88,30 +88,51 @@ func (l *policyLib) ProgramOptions() []cel.ProgramOption {
 	return nil
 }
 
-// withDeletePolicy creates a new map with deletePolicy set.
-// If deletePolicy is already set to a different value, returns an error.
-func withDeletePolicy(m traits.Mapper, policy string) ref.Val {
-	result := mapperToMutableMapper(m)
-
-	// Check if deletePolicy is already set
-	key := types.String("deletePolicy")
-	if existing := result.Get(key); existing != types.NullValue {
-		existingStr, ok := existing.(types.String)
-		if ok && string(existingStr) != policy {
-			return types.NewErr("deletePolicy cannot be set multiple times (already set to %q, cannot change to %q)", existingStr, policy)
-		}
-	}
-
-	result.Insert(key, types.String(policy))
-	return result.ToImmutableMap()
+type policyValue struct {
+	ref.Val
+	deletePolicy string
+	policyType   ref.Type
 }
 
-// mapperToMutableMapper copies a traits.Mapper into a MutableMap.
-func mapperToMutableMapper(m traits.Mapper) traits.MutableMapper {
-	vals := make(map[ref.Val]ref.Val, m.Size().(types.Int))
-	for it := m.Iterator(); it.HasNext().(types.Bool); {
-		k := it.Next()
-		vals[k] = m.Get(k)
+func newPolicyValue(policy string) *policyValue {
+	m := types.NewMutableMap(types.DefaultTypeAdapter, make(map[ref.Val]ref.Val))
+	if policy != "" {
+		m.Insert(types.String("deletePolicy"), types.String(policy))
 	}
-	return types.NewMutableMap(types.DefaultTypeAdapter, vals)
+	return &policyValue{
+		Val:          m.ToImmutableMap(),
+		deletePolicy: policy,
+		policyType:   types.NewObjectTypeValue("kro.Policy"),
+	}
+}
+
+func (p *policyValue) Type() ref.Type {
+	return p.policyType
+}
+
+func (p *policyValue) Get(key ref.Val) ref.Val {
+	return p.Val.(traits.Mapper).Get(key)
+}
+
+func (p *policyValue) Contains(value ref.Val) ref.Val {
+	return p.Val.(traits.Container).Contains(value)
+}
+
+func (p *policyValue) Iterator() traits.Iterator {
+	return p.Val.(traits.Iterable).Iterator()
+}
+
+func (p *policyValue) Size() ref.Val {
+	return p.Val.(traits.Sizer).Size()
+}
+
+func (p *policyValue) Find(key ref.Val) (ref.Val, bool) {
+	return p.Val.(traits.Mapper).Find(key)
+}
+
+func (p *policyValue) withDeletePolicy(policy string) ref.Val {
+	if p.deletePolicy != "" && p.deletePolicy != policy {
+		return types.NewErr("deletePolicy cannot be set multiple times (already set to %q, cannot change to %q)", p.deletePolicy, policy)
+	}
+	return newPolicyValue(policy)
 }
