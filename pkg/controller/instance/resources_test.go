@@ -652,7 +652,7 @@ func TestApplyDecoratorLabelsAndPatchMetadata(t *testing.T) {
 	obj.SetLabels(map[string]string{"keep": "yes"})
 
 	runtimeNode := rcx.Runtime.Nodes()[0]
-	controller.applyDecoratorLabels(rcx, runtimeNode, obj, "configs", &CollectionInfo{Index: 1, Size: 3})
+	controller.applyDecoratorLabels(rcx, runtimeNode, obj, "configs", &CollectionInfo{Index: 1, Size: 3}, false)
 
 	assert.Equal(t, "yes", obj.GetLabels()["keep"])
 	assert.Equal(t, "configs", obj.GetLabels()[metadata.NodeIDLabel])
