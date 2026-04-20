@@ -629,7 +629,19 @@ func TestProcessExternalCollectionNodePaths(t *testing.T) {
 
 func TestApplyDecoratorLabelsAndPatchMetadata(t *testing.T) {
 	instance := newInstanceObject("demo", "default")
-	controller, rcx, raw := newControllerAndContext(t, instance, newTestGraph())
+
+	// Create a simple test node (no lifecycle policy)
+	testNode := &graph.Node{
+		Meta: graph.NodeMeta{
+			ID:         "configs",
+			Type:       graph.NodeTypeResource,
+			GVR:        controllerTestCMGVR,
+			Namespaced: true,
+		},
+		Template: newConfigMapObject("test", "default"),
+	}
+
+	controller, rcx, raw := newControllerAndContext(t, instance, newTestGraph(testNode))
 
 	conflictingLabeler := metadata.GenericLabeler{
 		metadata.InstanceIDLabel: "conflict",
@@ -638,7 +650,9 @@ func TestApplyDecoratorLabelsAndPatchMetadata(t *testing.T) {
 
 	obj := newConfigMapObject("demo", "default")
 	obj.SetLabels(map[string]string{"keep": "yes"})
-	controller.applyDecoratorLabels(rcx, obj, "configs", &CollectionInfo{Index: 1, Size: 3})
+
+	runtimeNode := rcx.Runtime.Nodes()[0]
+	controller.applyDecoratorLabels(rcx, runtimeNode, obj, "configs", &CollectionInfo{Index: 1, Size: 3})
 
 	assert.Equal(t, "yes", obj.GetLabels()["keep"])
 	assert.Equal(t, "configs", obj.GetLabels()[metadata.NodeIDLabel])
