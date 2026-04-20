@@ -223,11 +223,6 @@ func (c *Controller) pruneOrphans(
 	pruneResult, err := applier.Prune(rcx.Ctx, applyset.PruneOptions{
 		KeepUIDs: result.ObservedUIDs(),
 		Scope:    pruneScope,
-		OrphanFunc: func(obj *unstructured.Unstructured) bool {
-			// Check if resource has lifecycle-policy=retain annotation
-			annotations := obj.GetAnnotations()
-			return annotations != nil && annotations[metadata.LifecyclePolicyAnnotation] == "retain"
-		},
 	})
 	if err != nil {
 		return false, false, rcx.delayedRequeue(fmt.Errorf("prune failed: %w", err))

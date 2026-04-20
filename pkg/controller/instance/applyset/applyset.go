@@ -97,10 +97,6 @@ type PruneOptions struct {
 	Scope *PruneScope
 	// Concurrency limits parallel delete operations. 0 = len(candidates).
 	Concurrency int
-	// OrphanFunc is called for each prune candidate to determine if it should be orphaned.
-	// If it returns true, applyset membership labels are removed and the resource is kept.
-	// If nil, all prune candidates are deleted.
-	OrphanFunc func(*unstructured.Unstructured) bool
 }
 
 // PruneScope defines the search space for orphan detection.
@@ -359,7 +355,7 @@ func (a *ApplySet) Prune(ctx context.Context, opts PruneOptions) (*PruneResult, 
 	}
 
 	// List and delete orphans
-	pruned, conflicts, err := a.prune(ctx, pruneMappings, scopeNamespaces, opts.KeepUIDs, opts.Concurrency, opts.OrphanFunc)
+	pruned, conflicts, err := a.prune(ctx, pruneMappings, scopeNamespaces, opts.KeepUIDs, opts.Concurrency)
 	if err != nil {
 		return nil, err
 	}
@@ -477,7 +473,6 @@ func (a *ApplySet) prune(
 	namespaces sets.Set[string],
 	keepUIDs sets.Set[types.UID],
 	concurrency int,
-	orphanFunc func(*unstructured.Unstructured) bool,
 ) ([]PruneResultItem, int, error) {
 	// Track candidates with their GVR for deletion
 	type pruneCandidate struct {
@@ -566,18 +561,18 @@ func (a *ApplySet) prune(
 
 	for _, c := range candidates {
 		eg.Go(func() error {
-			// Check if this resource should be orphaned instead of deleted
-			if orphanFunc != nil && orphanFunc(c.obj) {
-				// Orphan by removing KRO management labels
+			// Patch to remove labels if resource has lifecycle-policy=retain annotation
+			annotations := c.obj.GetAnnotations()
+			if annotations != nil && annotations["internal.kro.run/lifecycle-policy"] == "retain" {
 				if err := a.orphanResource(egCtx, c.obj, c.gvr); err != nil {
-					a.log.Error(err, "failed to orphan resource",
+					a.log.Error(err, "failed to orphan resource with retain policy",
 						"name", c.obj.GetName(),
 						"namespace", c.obj.GetNamespace(),
 						"gvr", c.gvr.String(),
 					)
 					return err
 				}
-				a.log.V(2).Info("orphaned resource",
+				a.log.V(2).Info("orphaned resource with retain policy",
 					"name", c.obj.GetName(),
 					"namespace", c.obj.GetNamespace(),
 					"gvr", c.gvr.String(),
@@ -633,7 +628,7 @@ func (a *ApplySet) prune(
 	return results, conflicts, nil
 }
 
-// orphanResource removes KRO management labels from a resource, leaving it in the cluster.
+// orphanResource removes applyset membership label from a resource.
 func (a *ApplySet) orphanResource(ctx context.Context, obj *unstructured.Unstructured, gvr schema.GroupVersionResource) error {
 	// Get current resource state
 	var current *unstructured.Unstructured
