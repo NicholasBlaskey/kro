@@ -195,7 +195,7 @@ func (c *Controller) deleteTarget(
 
 		if shouldRetain {
 			// Orphan instead of delete
-			if err := applyset.RemoveKroLabelsToRetainResource(rcx.Ctx, rcx.Client, node.Spec.Meta.GVR, target.GetNamespace(), target.GetName(), true); err != nil {
+			if err := applyset.RemoveKroLabelsToRetainResource(rcx.Ctx, rcx.Client, node.Spec.Meta.GVR, target.GetNamespace(), target.GetName()); err != nil {
 				state.SetError(err)
 				return err
 			}

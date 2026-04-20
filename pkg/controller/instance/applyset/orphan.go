@@ -16,18 +16,22 @@ package applyset
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/retry"
 
 	internalv1alpha1 "github.com/kubernetes-sigs/kro/api/internal.kro.run/v1alpha1"
 	"github.com/kubernetes-sigs/kro/pkg/metadata"
 )
 
 // RemoveKroLabelsToRetainResource removes KRO management labels from a resource.
+// Always removes all kro.run/* and internal.kro.run/* labels, plus applyset membership.
 // Returns nil if resource not found.
 func RemoveKroLabelsToRetainResource(
 	ctx context.Context,
@@ -35,7 +39,6 @@ func RemoveKroLabelsToRetainResource(
 	gvr schema.GroupVersionResource,
 	namespace string,
 	name string,
-	removeAll bool, // if false, only remove applyset label
 ) error {
 	var rc dynamic.ResourceInterface
 	if namespace != "" {
@@ -44,51 +47,65 @@ func RemoveKroLabelsToRetainResource(
 		rc = client.Resource(gvr)
 	}
 
-	current, err := rc.Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := rc.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+
+		labels := current.GetLabels()
+		if labels == nil {
 			return nil
 		}
-		return err
-	}
 
-	labels := current.GetLabels()
-	if labels == nil {
-		return nil
-	}
+		labelsToRemove := make(map[string]interface{})
+		for key, value := range labels {
+			shouldRemove := false
 
-	modified := false
-	for key, value := range labels {
-		shouldRemove := false
-
-		if removeAll {
 			// Remove all kro.run/* and internal.kro.run/* labels
 			if strings.HasPrefix(key, metadata.LabelKROPrefix) ||
 				strings.HasPrefix(key, internalv1alpha1.InternalKRODomainName+"/") {
 				shouldRemove = true
 			}
+
 			// Remove app.kubernetes.io/managed-by if value is "kro"
 			if key == metadata.ManagedByLabelKey && value == metadata.ManagedByKROValue {
 				shouldRemove = true
 			}
+
+			// Always remove applyset.kubernetes.io/part-of label
+			if key == ApplysetPartOfLabel {
+				shouldRemove = true
+			}
+
+			if shouldRemove {
+				labelsToRemove[key] = nil
+			}
 		}
 
-		// Always remove applyset.kubernetes.io/part-of label
-		if key == ApplysetPartOfLabel {
-			shouldRemove = true
+		if len(labelsToRemove) == 0 {
+			return nil
 		}
 
-		if shouldRemove {
-			delete(labels, key)
-			modified = true
+		patch := map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"labels":          labelsToRemove,
+				"resourceVersion": current.GetResourceVersion(),
+			},
 		}
-	}
 
-	if !modified {
-		return nil
-	}
+		patchBytes, err := json.Marshal(patch)
+		if err != nil {
+			return err
+		}
 
-	current.SetLabels(labels)
-	_, err = rc.Update(ctx, current, metav1.UpdateOptions{})
-	return err
+		_, err = rc.Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	})
 }
