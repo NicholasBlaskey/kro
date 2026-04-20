@@ -62,26 +62,10 @@ func RemoveKroLabelsToRetainResource(
 		}
 
 		labelsToRemove := make(map[string]interface{})
-		for key, value := range labels {
-			shouldRemove := false
-
-			// Remove all kro.run/* and internal.kro.run/* labels
+		for key := range labels {
 			if strings.HasPrefix(key, metadata.LabelKROPrefix) ||
-				strings.HasPrefix(key, internalv1alpha1.InternalKRODomainName+"/") {
-				shouldRemove = true
-			}
-
-			// Remove app.kubernetes.io/managed-by if value is "kro"
-			if key == metadata.ManagedByLabelKey && value == metadata.ManagedByKROValue {
-				shouldRemove = true
-			}
-
-			// Always remove applyset.kubernetes.io/part-of label
-			if key == ApplysetPartOfLabel {
-				shouldRemove = true
-			}
-
-			if shouldRemove {
+				strings.HasPrefix(key, internalv1alpha1.InternalKRODomainName+"/") ||
+				key == ApplysetPartOfLabel {
 				labelsToRemove[key] = nil
 			}
 		}
