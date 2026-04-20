@@ -59,6 +59,51 @@ func resourceRef(obj *unstructured.Unstructured) string {
 	return obj.GetNamespace() + "/" + obj.GetName()
 }
 
+// orphanNode removes KRO management labels from a node's resources.
+// This is used during normal reconciliation when a resource's lifecycle policy indicates it should be retained.
+func (c *Controller) orphanNode(rcx *ReconcileContext, node *runtime.Node) error {
+	// Get the desired identity to locate the resource
+	desired, err := node.GetDesiredIdentity()
+	if err != nil {
+		if runtime.IsDataPending(err) {
+			// Can't locate resource yet, skip orphaning for now
+			return nil
+		}
+		return err
+	}
+
+	if len(desired) == 0 {
+		return nil
+	}
+
+	desc := node.Spec.Meta
+
+	switch desc.Type {
+	case graph.NodeTypeResource:
+		// Single resource - orphan it
+		if len(desired) > 0 {
+			return c.orphanResource(rcx, desc, desired[0])
+		}
+
+	case graph.NodeTypeCollection:
+		// Collection - orphan all items
+		for _, obj := range desired {
+			if err := c.orphanResource(rcx, desc, obj); err != nil {
+				return err
+			}
+		}
+
+	case graph.NodeTypeExternal, graph.NodeTypeExternalCollection:
+		// External resources are not managed, nothing to orphan
+		return nil
+
+	default:
+		return fmt.Errorf("unknown node type: %v", desc.Type)
+	}
+
+	return nil
+}
+
 // reconcileResult tracks state flowing through the reconcileNodes pipeline.
 type reconcileResult struct {
 	resources      []applyset.Resource
@@ -280,6 +325,25 @@ func (c *Controller) processNode(
 	if ignored {
 		rcx.StateManager.SetNodeState(id, skippedState())
 		rcx.Log.V(2).Info("Skipping resource", "id", id, "reason", "ignored")
+		return []applyset.Resource{{
+			ID:        id,
+			SkipApply: true,
+		}}, nil
+	}
+
+	// Check if resource should be retained (lifecycle policy)
+	shouldRetain, err := node.ShouldRetain()
+	if err != nil {
+		rcx.StateManager.SetNodeState(id, errorState(err))
+		return nil, err
+	}
+	if shouldRetain {
+		rcx.Log.Info("Retaining resource due to lifecycle policy", "resource", id)
+		if err := c.orphanNode(rcx, node); err != nil {
+			rcx.StateManager.SetNodeState(id, errorState(err))
+			return nil, err
+		}
+		rcx.StateManager.SetNodeState(id, skippedState())
 		return []applyset.Resource{{
 			ID:        id,
 			SkipApply: true,

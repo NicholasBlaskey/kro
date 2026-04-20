@@ -16,6 +16,7 @@ package instance
 
 import (
 	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,6 +25,8 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
+	internalv1alpha1 "github.com/kubernetes-sigs/kro/api/internal.kro.run/v1alpha1"
+	"github.com/kubernetes-sigs/kro/pkg/controller/instance/applyset"
 	"github.com/kubernetes-sigs/kro/pkg/graph"
 	"github.com/kubernetes-sigs/kro/pkg/metadata"
 	"github.com/kubernetes-sigs/kro/pkg/runtime"
@@ -177,6 +180,10 @@ func (c *Controller) deleteTarget(
 	}
 	if shouldRetain {
 		rcx.Log.Info("Retaining resource due to lifecycle policy", "resource", node.Spec.Meta.ID)
+		if err := c.orphanTargets(rcx, node); err != nil {
+			state.SetError(err)
+			return err
+		}
 		state.SetDeleted()
 		return nil
 	}
@@ -267,4 +274,75 @@ func (c *Controller) setUnmanaged(rcx *ReconcileContext, obj *unstructured.Unstr
 		return nil, fmt.Errorf("failed to update unmanaged state: %w", err)
 	}
 	return updated, nil
+}
+
+// orphanTargets removes KRO management labels from retained resources.
+func (c *Controller) orphanTargets(rcx *ReconcileContext, node *runtime.Node) error {
+	targets, err := node.DeleteTargets()
+	if err != nil {
+		return err
+	}
+
+	for _, target := range targets {
+		if err := c.orphanResource(rcx, node.Spec.Meta, target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// orphanResource removes all KRO management labels from a single resource.
+func (c *Controller) orphanResource(rcx *ReconcileContext, desc graph.NodeMeta, obj *unstructured.Unstructured) error {
+	rc := resourceClientFor(rcx, desc, obj.GetNamespace())
+	current, err := rc.Get(rcx.Ctx, obj.GetName(), metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	labels := current.GetLabels()
+	if labels == nil {
+		return nil
+	}
+
+	modified := false
+	for key, value := range labels {
+		shouldRemove := false
+
+		// Remove all kro.run/* and internal.kro.run/* labels
+		if strings.HasPrefix(key, metadata.LabelKROPrefix) ||
+			strings.HasPrefix(key, internalv1alpha1.InternalKRODomainName+"/") {
+			shouldRemove = true
+		}
+
+		// Remove applyset.kubernetes.io/part-of label
+		if key == applyset.ApplysetPartOfLabel {
+			shouldRemove = true
+		}
+
+		// Remove app.kubernetes.io/managed-by if value is "kro"
+		if key == metadata.ManagedByLabelKey && value == metadata.ManagedByKROValue {
+			shouldRemove = true
+		}
+
+		if shouldRemove {
+			delete(labels, key)
+			modified = true
+		}
+	}
+
+	if !modified {
+		return nil
+	}
+
+	rcx.Log.Info("Orphaning resource (removing KRO labels)",
+		"resource", obj.GetName(),
+		"namespace", obj.GetNamespace(),
+		"nodeID", desc.ID)
+
+	current.SetLabels(labels)
+	_, err = rc.Update(rcx.Ctx, current, metav1.UpdateOptions{})
+	return err
 }
