@@ -628,8 +628,6 @@ func (a *ApplySet) prune(
 	return results, conflicts, nil
 }
 
-// orphanResource removes applyset membership label from a resource.
-
 func (a *ApplySet) parentAnnotationSets() (sets.Set[schema.GroupKind], sets.Set[string]) {
 	gks := sets.New[schema.GroupKind]()
 	namespaces := sets.New[string]()
