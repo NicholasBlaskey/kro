@@ -564,7 +564,7 @@ func (a *ApplySet) prune(
 			// Patch to remove labels if resource has lifecycle-policy=retain annotation
 			annotations := c.obj.GetAnnotations()
 			if annotations != nil && annotations["internal.kro.run/lifecycle-policy"] == "retain" {
-				if err := a.orphanResource(egCtx, c.obj, c.gvr); err != nil {
+				if err := RemoveKroLabelsToRetainResource(egCtx, a.client, c.gvr, c.obj.GetNamespace(), c.obj.GetName(), false); err != nil {
 					a.log.Error(err, "failed to orphan resource with retain policy",
 						"name", c.obj.GetName(),
 						"namespace", c.obj.GetNamespace(),
@@ -629,46 +629,6 @@ func (a *ApplySet) prune(
 }
 
 // orphanResource removes applyset membership label from a resource.
-func (a *ApplySet) orphanResource(ctx context.Context, obj *unstructured.Unstructured, gvr schema.GroupVersionResource) error {
-	// Get current resource state
-	var current *unstructured.Unstructured
-	var err error
-	if obj.GetNamespace() != "" {
-		current, err = a.client.Resource(gvr).Namespace(obj.GetNamespace()).Get(ctx, obj.GetName(), metav1.GetOptions{})
-	} else {
-		current, err = a.client.Resource(gvr).Get(ctx, obj.GetName(), metav1.GetOptions{})
-	}
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-
-	labels := current.GetLabels()
-	if labels == nil {
-		return nil
-	}
-
-	// Remove applyset membership label
-	modified := false
-	if _, exists := labels[ApplysetPartOfLabel]; exists {
-		delete(labels, ApplysetPartOfLabel)
-		modified = true
-	}
-
-	if !modified {
-		return nil
-	}
-
-	current.SetLabels(labels)
-	if current.GetNamespace() != "" {
-		_, err = a.client.Resource(gvr).Namespace(current.GetNamespace()).Update(ctx, current, metav1.UpdateOptions{})
-	} else {
-		_, err = a.client.Resource(gvr).Update(ctx, current, metav1.UpdateOptions{})
-	}
-	return err
-}
 
 func (a *ApplySet) parentAnnotationSets() (sets.Set[schema.GroupKind], sets.Set[string]) {
 	gks := sets.New[schema.GroupKind]()

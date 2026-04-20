@@ -1,0 +1,94 @@
+// Copyright 2025 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package applyset
+
+import (
+	"context"
+	"strings"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+
+	internalv1alpha1 "github.com/kubernetes-sigs/kro/api/internal.kro.run/v1alpha1"
+	"github.com/kubernetes-sigs/kro/pkg/metadata"
+)
+
+// RemoveKroLabelsToRetainResource removes KRO management labels from a resource.
+// Returns nil if resource not found.
+func RemoveKroLabelsToRetainResource(
+	ctx context.Context,
+	client dynamic.Interface,
+	gvr schema.GroupVersionResource,
+	namespace string,
+	name string,
+	removeAll bool, // if false, only remove applyset label
+) error {
+	var rc dynamic.ResourceInterface
+	if namespace != "" {
+		rc = client.Resource(gvr).Namespace(namespace)
+	} else {
+		rc = client.Resource(gvr)
+	}
+
+	current, err := rc.Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	labels := current.GetLabels()
+	if labels == nil {
+		return nil
+	}
+
+	modified := false
+	for key, value := range labels {
+		shouldRemove := false
+
+		if removeAll {
+			// Remove all kro.run/* and internal.kro.run/* labels
+			if strings.HasPrefix(key, metadata.LabelKROPrefix) ||
+				strings.HasPrefix(key, internalv1alpha1.InternalKRODomainName+"/") {
+				shouldRemove = true
+			}
+			// Remove app.kubernetes.io/managed-by if value is "kro"
+			if key == metadata.ManagedByLabelKey && value == metadata.ManagedByKROValue {
+				shouldRemove = true
+			}
+		}
+
+		// Always remove applyset.kubernetes.io/part-of label
+		if key == ApplysetPartOfLabel {
+			shouldRemove = true
+		}
+
+		if shouldRemove {
+			delete(labels, key)
+			modified = true
+		}
+	}
+
+	if !modified {
+		return nil
+	}
+
+	current.SetLabels(labels)
+	_, err = rc.Update(ctx, current, metav1.UpdateOptions{})
+	return err
+}
