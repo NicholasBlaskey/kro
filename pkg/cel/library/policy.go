@@ -70,7 +70,7 @@ func (l *policyLib) CompileOptions() []cel.EnvOption {
 				[]*cel.Type{},
 				policyType,
 				cel.FunctionBinding(func(args ...ref.Val) ref.Val {
-					return newPolicyValue("")
+					return newPolicyValue()
 				}),
 			),
 		),
@@ -83,7 +83,11 @@ func (l *policyLib) CompileOptions() []cel.EnvOption {
 					if !ok {
 						return types.NewErr("withRetain() can only be called on a Policy")
 					}
-					return p.withDeletePolicy("retain")
+					result := p.withRetain()
+					if result.deletePolicy != "retain" {
+						return types.NewErr("deletePolicy cannot be set multiple times (already set to %q, cannot change to \"retain\")", p.deletePolicy)
+					}
+					return result
 				}),
 			),
 		),
@@ -96,7 +100,11 @@ func (l *policyLib) CompileOptions() []cel.EnvOption {
 					if !ok {
 						return types.NewErr("withDelete() can only be called on a Policy")
 					}
-					return p.withDeletePolicy("delete")
+					result := p.withDelete()
+					if result.deletePolicy != "delete" {
+						return types.NewErr("deletePolicy cannot be set multiple times (already set to %q, cannot change to \"delete\")", p.deletePolicy)
+					}
+					return result
 				}),
 			),
 		),
@@ -113,16 +121,31 @@ type policyValue struct {
 	policyType   ref.Type
 }
 
-func newPolicyValue(policy string) *policyValue {
-	m := types.NewMutableMap(types.DefaultTypeAdapter, make(map[ref.Val]ref.Val))
-	if policy != "" {
-		m.Insert(types.String("deletePolicy"), types.String(policy))
-	}
+// newPolicyValue creates a new empty policy.
+func newPolicyValue() *policyValue {
 	return &policyValue{
-		Val:          m.ToImmutableMap(),
-		deletePolicy: policy,
+		Val:          types.NewMutableMap(types.DefaultTypeAdapter, make(map[ref.Val]ref.Val)).ToImmutableMap(),
+		deletePolicy: "",
 		policyType:   types.NewObjectTypeValue("kro.Policy"),
 	}
+}
+
+// withRetain returns a new policy with deletePolicy set to "retain".
+func (p *policyValue) withRetain() *policyValue {
+	if p.deletePolicy != "" && p.deletePolicy != "retain" {
+		// This would return an error in the CEL binding, handled there
+		return p
+	}
+	return p.withDeletePolicy("retain")
+}
+
+// withDelete returns a new policy with deletePolicy set to "delete".
+func (p *policyValue) withDelete() *policyValue {
+	if p.deletePolicy != "" && p.deletePolicy != "delete" {
+		// This would return an error in the CEL binding, handled there
+		return p
+	}
+	return p.withDeletePolicy("delete")
 }
 
 func (p *policyValue) Type() ref.Type {
@@ -149,9 +172,14 @@ func (p *policyValue) Find(key ref.Val) (ref.Val, bool) {
 	return p.Val.(traits.Mapper).Find(key)
 }
 
-func (p *policyValue) withDeletePolicy(policy string) ref.Val {
-	if p.deletePolicy != "" && p.deletePolicy != policy {
-		return types.NewErr("deletePolicy cannot be set multiple times (already set to %q, cannot change to %q)", p.deletePolicy, policy)
+// withDeletePolicy is an internal helper that creates a new policy with the given deletePolicy.
+func (p *policyValue) withDeletePolicy(policy string) *policyValue {
+	m := types.NewMutableMap(types.DefaultTypeAdapter, make(map[ref.Val]ref.Val))
+	m.Insert(types.String("deletePolicy"), types.String(policy))
+
+	return &policyValue{
+		Val:          m.ToImmutableMap(),
+		deletePolicy: policy,
+		policyType:   p.policyType,
 	}
-	return newPolicyValue(policy)
 }
