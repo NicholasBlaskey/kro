@@ -172,22 +172,6 @@ func (c *Controller) deleteTarget(
 	node *runtime.Node,
 	state *NodeState,
 ) error {
-	// Check if the resource should be retained based on its lifecycle policy
-	shouldRetain, err := node.ShouldRetain()
-	if err != nil {
-		state.SetError(err)
-		return err
-	}
-	if shouldRetain {
-		rcx.Log.Info("Retaining resource due to lifecycle policy", "resource", node.Spec.Meta.ID)
-		if err := c.orphanTargets(rcx, node); err != nil {
-			state.SetError(err)
-			return err
-		}
-		state.SetDeleted()
-		return nil
-	}
-
 	targets, err := node.DeleteTargets()
 	if err != nil {
 		state.SetError(err)
@@ -198,11 +182,29 @@ func (c *Controller) deleteTarget(
 		return nil
 	}
 
+	// Check if the resource should be retained based on its lifecycle policy
+	shouldRetain, err := node.ShouldRetain()
+	if err != nil {
+		state.SetError(err)
+		return err
+	}
+
 	// Track whether any delete request was accepted. a successful Delete does NOT
 	// mean the object is gone yet, just that deletion is in progress.
 	anyDeleted := false
 	for _, target := range targets {
 		rc := resourceClientFor(rcx, node.Spec.Meta, target.GetNamespace())
+
+		if shouldRetain {
+			// Orphan instead of delete
+			if err := c.orphanResource(rcx, node.Spec.Meta, target); err != nil {
+				state.SetError(err)
+				return err
+			}
+			rcx.Log.Info("Orphaned resource due to lifecycle policy", "resource", node.Spec.Meta.ID, "name", target.GetName())
+			continue
+		}
+
 		err := rc.Delete(rcx.Ctx, target.GetName(), metav1.DeleteOptions{})
 		if apierrors.IsNotFound(err) {
 			// Already gone: leave anyDeleted as is and keep checking others.
@@ -277,20 +279,6 @@ func (c *Controller) setUnmanaged(rcx *ReconcileContext, obj *unstructured.Unstr
 }
 
 // orphanTargets removes KRO management labels from retained resources.
-func (c *Controller) orphanTargets(rcx *ReconcileContext, node *runtime.Node) error {
-	targets, err := node.DeleteTargets()
-	if err != nil {
-		return err
-	}
-
-	for _, target := range targets {
-		if err := c.orphanResource(rcx, node.Spec.Meta, target); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // orphanResource removes all KRO management labels from a single resource.
 func (c *Controller) orphanResource(rcx *ReconcileContext, desc graph.NodeMeta, obj *unstructured.Unstructured) error {
 	rc := resourceClientFor(rcx, desc, obj.GetNamespace())
