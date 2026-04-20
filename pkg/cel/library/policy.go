@@ -15,6 +15,8 @@
 package library
 
 import (
+	"math"
+
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
@@ -33,11 +35,28 @@ import (
 //	lifecycle: "${policy()}"                    // {}
 //	lifecycle: "${policy().withRetain()}"       // {deletePolicy: "retain"}
 //	lifecycle: "${policy().withDelete()}"       // {deletePolicy: "delete"}
-func Policy() cel.EnvOption {
-	return cel.Lib(&policyLib{})
+func Policy(options ...PolicyOption) cel.EnvOption {
+	lib := &policyLib{version: math.MaxUint32}
+	for _, o := range options {
+		lib = o(lib)
+	}
+	return cel.Lib(lib)
 }
 
-type policyLib struct{}
+type policyLib struct {
+	version uint32
+}
+
+// PolicyOption is a functional option for configuring the policy library.
+type PolicyOption func(*policyLib) *policyLib
+
+// PolicyVersion configures the version of the policy library.
+func PolicyVersion(version uint32) PolicyOption {
+	return func(lib *policyLib) *policyLib {
+		lib.version = version
+		return lib
+	}
+}
 
 func (l *policyLib) LibraryName() string {
 	return "kro.policy"
