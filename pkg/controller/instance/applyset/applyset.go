@@ -97,6 +97,10 @@ type PruneOptions struct {
 	Scope *PruneScope
 	// Concurrency limits parallel delete operations. 0 = len(candidates).
 	Concurrency int
+	// OrphanFunc is called for resources that should be orphaned instead of deleted.
+	// If it returns true, the resource labels are removed but the resource is not deleted.
+	// If nil, all prune candidates are deleted.
+	OrphanFunc func(*unstructured.Unstructured) bool
 }
 
 // PruneScope defines the search space for orphan detection.
@@ -355,7 +359,7 @@ func (a *ApplySet) Prune(ctx context.Context, opts PruneOptions) (*PruneResult, 
 	}
 
 	// List and delete orphans
-	pruned, conflicts, err := a.prune(ctx, pruneMappings, scopeNamespaces, opts.KeepUIDs, opts.Concurrency)
+	pruned, conflicts, err := a.prune(ctx, pruneMappings, scopeNamespaces, opts.KeepUIDs, opts.Concurrency, opts.OrphanFunc)
 	if err != nil {
 		return nil, err
 	}
@@ -473,6 +477,7 @@ func (a *ApplySet) prune(
 	namespaces sets.Set[string],
 	keepUIDs sets.Set[types.UID],
 	concurrency int,
+	orphanFunc func(*unstructured.Unstructured) bool,
 ) ([]PruneResultItem, int, error) {
 	// Track candidates with their GVR for deletion
 	type pruneCandidate struct {
@@ -561,6 +566,17 @@ func (a *ApplySet) prune(
 
 	for _, c := range candidates {
 		eg.Go(func() error {
+			// Check if this resource should be orphaned instead of deleted
+			if orphanFunc != nil && orphanFunc(c.obj) {
+				a.log.V(2).Info("orphaning resource instead of deleting",
+					"name", c.obj.GetName(),
+					"namespace", c.obj.GetNamespace(),
+					"gvr", c.gvr.String(),
+				)
+				// Resource will be handled by OrphanFunc, skip delete
+				return nil
+			}
+
 			deleteOpts := metav1.DeleteOptions{
 				Preconditions: &metav1.Preconditions{UID: new(c.obj.GetUID())},
 			}

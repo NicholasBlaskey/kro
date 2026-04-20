@@ -23,8 +23,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 	"github.com/kubernetes-sigs/kro/pkg/controller/instance/applyset"
@@ -147,11 +145,6 @@ func (c *Controller) pruneIfSafe(rcx *ReconcileContext, r *reconcileResult) erro
 		return nil
 	}
 
-	// Orphan resources with retain lifecycle policy before pruning
-	if err := c.orphanRetainedResources(rcx, r.applier, r.applyResult, r.supersetPatch); err != nil {
-		return err
-	}
-
 	pruned, needsRetry, err := c.pruneOrphans(rcx, r.applier, r.applyResult, r.supersetPatch, r.batchMeta)
 	if err != nil {
 		return err
@@ -230,6 +223,25 @@ func (c *Controller) pruneOrphans(
 	pruneResult, err := applier.Prune(rcx.Ctx, applyset.PruneOptions{
 		KeepUIDs: result.ObservedUIDs(),
 		Scope:    pruneScope,
+		OrphanFunc: func(obj *unstructured.Unstructured) bool {
+			// Check if resource has lifecycle-policy=retain label
+			labels := obj.GetLabels()
+			if labels != nil && labels[metadata.LifecyclePolicyLabel] == "retain" {
+				// Orphan this resource by removing KRO labels
+				gvk := obj.GroupVersionKind()
+				desc := graph.NodeMeta{
+					GVR:        schema.GroupVersionResource{Group: gvk.Group, Version: gvk.Version, Resource: gvk.Kind},
+					Namespaced: obj.GetNamespace() != "",
+				}
+				if err := c.orphanResource(rcx, desc, obj); err != nil {
+					rcx.Log.Error(err, "failed to orphan resource with retain policy",
+						"name", obj.GetName(),
+						"namespace", obj.GetNamespace())
+				}
+				return true
+			}
+			return false
+		},
 	})
 	if err != nil {
 		return false, false, rcx.delayedRequeue(fmt.Errorf("prune failed: %w", err))
@@ -293,7 +305,6 @@ func (c *Controller) processNode(
 			SkipApply: true,
 		}}, nil
 	}
-
 
 	desired, err := node.GetDesired()
 	if err != nil {
@@ -555,99 +566,4 @@ func requestCollectionWatch(rcx *ReconcileContext, nodeID string, gvr schema.Gro
 	}); err != nil {
 		rcx.Log.Error(err, "failed to register collection watch", "nodeID", nodeID, "gvr", gvr)
 	}
-}
-
-// orphanRetainedResources finds resources with lifecycle-policy=retain label and orphans them
-// before pruning. This ensures resources marked for retention are not deleted during prune.
-func (c *Controller) orphanRetainedResources(
-	rcx *ReconcileContext,
-	applier *applyset.ApplySet,
-	result *applyset.ApplyResult,
-	supersetPatch applyset.Metadata,
-) error {
-	pruneScope := supersetPatch.PruneScope()
-	keepUIDs := result.ObservedUIDs()
-
-	// Convert GKs to RESTMappings
-	scopeGKs := pruneScope.GroupKinds
-	scopeNamespaces := pruneScope.Namespaces.Clone()
-	if rcx.Instance.GetNamespace() != "" {
-		scopeNamespaces.Insert(rcx.Instance.GetNamespace())
-	}
-
-	for gk := range scopeGKs {
-		mapping, err := rcx.RestMapper.RESTMapping(gk)
-		if err != nil {
-			rcx.Log.V(2).Info("skipping GK for retain check, REST mapping failed", "gk", gk, "error", err)
-			continue
-		}
-
-		gvr := mapping.Resource
-
-		// List resources with applyset label and retain lifecycle policy
-		labelSelector := fmt.Sprintf("%s=%s,%s=%s",
-			applyset.ApplysetPartOfLabel, applyset.ID(rcx.Instance),
-			metadata.LifecyclePolicyLabel, "retain")
-
-		if mapping.Scope.Name() == "Namespace" {
-			// Namespace-scoped: list in each namespace
-			for ns := range scopeNamespaces {
-				if err := c.orphanRetainedInNamespace(rcx, gvr, ns, labelSelector, keepUIDs); err != nil {
-					return err
-				}
-			}
-		} else {
-			// Cluster-scoped
-			if err := c.orphanRetainedInNamespace(rcx, gvr, "", labelSelector, keepUIDs); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-// orphanRetainedInNamespace lists and orphans resources with retain policy in a given namespace.
-func (c *Controller) orphanRetainedInNamespace(
-	rcx *ReconcileContext,
-	gvr schema.GroupVersionResource,
-	namespace string,
-	labelSelector string,
-	keepUIDs sets.Set[types.UID],
-) error {
-	var list *unstructured.UnstructuredList
-	var err error
-
-	if namespace != "" {
-		list, err = rcx.Client.Resource(gvr).Namespace(namespace).List(rcx.Ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-	} else {
-		list, err = rcx.Client.Resource(gvr).List(rcx.Ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-	}
-
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("list %v in %s for retain orphaning: %w", gvr, namespace, err)
-	}
-
-	// Orphan resources that are not in keepUIDs (i.e., would be pruned)
-	for i := range list.Items {
-		obj := &list.Items[i]
-		if !keepUIDs.Has(obj.GetUID()) {
-			desc := graph.NodeMeta{
-				GVR:        gvr,
-				Namespaced: namespace != "",
-			}
-			if err := c.orphanResource(rcx, desc, obj); err != nil {
-				return fmt.Errorf("failed to orphan retained resource %s/%s: %w", obj.GetNamespace(), obj.GetName(), err)
-			}
-		}
-	}
-
-	return nil
 }

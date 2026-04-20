@@ -24,8 +24,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 
-	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 	internalv1alpha1 "github.com/kubernetes-sigs/kro/api/internal.kro.run/v1alpha1"
+	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 	"github.com/kubernetes-sigs/kro/pkg/controller/instance/applyset"
 	"github.com/kubernetes-sigs/kro/pkg/graph"
 	"github.com/kubernetes-sigs/kro/pkg/metadata"

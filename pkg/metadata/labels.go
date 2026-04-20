@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/release-utils/version"
 
+	internalv1alpha1 "github.com/kubernetes-sigs/kro/api/internal.kro.run/v1alpha1"
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 )
 
@@ -64,7 +65,7 @@ const (
 
 const (
 	// LabelInternalKROPrefix is the label key prefix for internal KRO implementation details.
-	LabelInternalKROPrefix = "internal.kro.run/"
+	LabelInternalKROPrefix = internalv1alpha1.InternalKRODomainName + "/"
 
 	// LifecyclePolicyLabel stores the evaluated lifecycle policy decision (e.g., "retain").
 	// This label is required because:
