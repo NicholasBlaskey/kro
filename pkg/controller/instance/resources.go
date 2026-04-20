@@ -224,23 +224,9 @@ func (c *Controller) pruneOrphans(
 		KeepUIDs: result.ObservedUIDs(),
 		Scope:    pruneScope,
 		OrphanFunc: func(obj *unstructured.Unstructured) bool {
-			// Check if resource has lifecycle-policy=retain label
-			labels := obj.GetLabels()
-			if labels != nil && labels[metadata.LifecyclePolicyLabel] == "retain" {
-				// Orphan this resource by removing KRO labels
-				gvk := obj.GroupVersionKind()
-				desc := graph.NodeMeta{
-					GVR:        schema.GroupVersionResource{Group: gvk.Group, Version: gvk.Version, Resource: gvk.Kind},
-					Namespaced: obj.GetNamespace() != "",
-				}
-				if err := c.orphanResource(rcx, desc, obj); err != nil {
-					rcx.Log.Error(err, "failed to orphan resource with retain policy",
-						"name", obj.GetName(),
-						"namespace", obj.GetNamespace())
-				}
-				return true
-			}
-			return false
+			// Check if resource has lifecycle-policy=retain annotation
+			annotations := obj.GetAnnotations()
+			return annotations != nil && annotations[metadata.LifecyclePolicyAnnotation] == "retain"
 		},
 	})
 	if err != nil {
@@ -385,6 +371,16 @@ func (c *Controller) processRegularNode(
 	// Apply decorator labels to desired object
 	c.applyDecoratorLabels(rcx, node, desired, id, nil)
 
+	// Store lifecycle policy decision as annotation for prune
+	if shouldRetain, err := node.ShouldRetain(); err == nil && shouldRetain {
+		annotations := desired.GetAnnotations()
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		annotations[metadata.LifecyclePolicyAnnotation] = "retain"
+		desired.SetAnnotations(annotations)
+	}
+
 	resource := applyset.Resource{
 		ID:      id,
 		Object:  desired,
@@ -432,11 +428,6 @@ func (c *Controller) applyDecoratorLabels(
 	if collectionInfo != nil {
 		labels[metadata.CollectionIndexLabel] = fmt.Sprintf("%d", collectionInfo.Index)
 		labels[metadata.CollectionSizeLabel] = fmt.Sprintf("%d", collectionInfo.Size)
-	}
-
-	// Add lifecycle policy label if resource should be retained
-	if shouldRetain, err := node.ShouldRetain(); err == nil && shouldRetain {
-		labels[metadata.LifecyclePolicyLabel] = "retain"
 	}
 
 	obj.SetLabels(labels)

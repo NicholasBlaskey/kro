@@ -180,14 +180,8 @@ func (n *Node) ShouldRetain() (bool, error) {
 		return false, nil
 	}
 
-	// Determine which dependencies are needed for the lifecycle expression
-	needed := make(map[string]struct{})
-	for _, ref := range n.Spec.Lifecycle.References {
-		needed[ref] = struct{}{}
-	}
-
-	// Build CEL context with only the needed dependencies
-	ctx := n.buildContext(slices.Collect(maps.Keys(needed))...)
+	// Lifecycle expressions can only reference schema
+	ctx := n.buildContext(graph.SchemaVarName)
 
 	// Evaluate the lifecycle expression
 	val, err := evalExprAny(&expressionEvaluationState{Expression: n.Spec.Lifecycle}, ctx)

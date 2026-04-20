@@ -97,8 +97,8 @@ type PruneOptions struct {
 	Scope *PruneScope
 	// Concurrency limits parallel delete operations. 0 = len(candidates).
 	Concurrency int
-	// OrphanFunc is called for resources that should be orphaned instead of deleted.
-	// If it returns true, the resource labels are removed but the resource is not deleted.
+	// OrphanFunc is called for each prune candidate to determine if it should be orphaned.
+	// If it returns true, applyset membership labels are removed and the resource is kept.
 	// If nil, all prune candidates are deleted.
 	OrphanFunc func(*unstructured.Unstructured) bool
 }
@@ -568,12 +568,20 @@ func (a *ApplySet) prune(
 		eg.Go(func() error {
 			// Check if this resource should be orphaned instead of deleted
 			if orphanFunc != nil && orphanFunc(c.obj) {
-				a.log.V(2).Info("orphaning resource instead of deleting",
+				// Orphan by removing KRO management labels
+				if err := a.orphanResource(egCtx, c.obj, c.gvr); err != nil {
+					a.log.Error(err, "failed to orphan resource",
+						"name", c.obj.GetName(),
+						"namespace", c.obj.GetNamespace(),
+						"gvr", c.gvr.String(),
+					)
+					return err
+				}
+				a.log.V(2).Info("orphaned resource",
 					"name", c.obj.GetName(),
 					"namespace", c.obj.GetNamespace(),
 					"gvr", c.gvr.String(),
 				)
-				// Resource will be handled by OrphanFunc, skip delete
 				return nil
 			}
 
@@ -623,6 +631,48 @@ func (a *ApplySet) prune(
 	}
 
 	return results, conflicts, nil
+}
+
+// orphanResource removes KRO management labels from a resource, leaving it in the cluster.
+func (a *ApplySet) orphanResource(ctx context.Context, obj *unstructured.Unstructured, gvr schema.GroupVersionResource) error {
+	// Get current resource state
+	var current *unstructured.Unstructured
+	var err error
+	if obj.GetNamespace() != "" {
+		current, err = a.client.Resource(gvr).Namespace(obj.GetNamespace()).Get(ctx, obj.GetName(), metav1.GetOptions{})
+	} else {
+		current, err = a.client.Resource(gvr).Get(ctx, obj.GetName(), metav1.GetOptions{})
+	}
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	labels := current.GetLabels()
+	if labels == nil {
+		return nil
+	}
+
+	// Remove applyset membership label
+	modified := false
+	if _, exists := labels[ApplysetPartOfLabel]; exists {
+		delete(labels, ApplysetPartOfLabel)
+		modified = true
+	}
+
+	if !modified {
+		return nil
+	}
+
+	current.SetLabels(labels)
+	if current.GetNamespace() != "" {
+		_, err = a.client.Resource(gvr).Namespace(current.GetNamespace()).Update(ctx, current, metav1.UpdateOptions{})
+	} else {
+		_, err = a.client.Resource(gvr).Update(ctx, current, metav1.UpdateOptions{})
+	}
+	return err
 }
 
 func (a *ApplySet) parentAnnotationSets() (sets.Set[schema.GroupKind], sets.Set[string]) {
