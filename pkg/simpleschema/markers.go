@@ -290,7 +290,7 @@ func applyDefaultMarker(schema *extv1.JSONSchemaProps, marker *Marker) {
 func applyMinimumMarker(schema *extv1.JSONSchemaProps, marker *Marker) error {
 	val, err := strconv.ParseFloat(marker.Value, 64)
 	if err != nil {
-		return fmt.Errorf("failed to parse minimum enum value: %w", err)
+		return fmt.Errorf("failed to parse minimum value: %w", err)
 	}
 	schema.Minimum = &val
 	return nil
@@ -299,7 +299,7 @@ func applyMinimumMarker(schema *extv1.JSONSchemaProps, marker *Marker) error {
 func applyMaximumMarker(schema *extv1.JSONSchemaProps, marker *Marker) error {
 	val, err := strconv.ParseFloat(marker.Value, 64)
 	if err != nil {
-		return fmt.Errorf("failed to parse maximum enum value: %w", err)
+		return fmt.Errorf("failed to parse maximum value: %w", err)
 	}
 	schema.Maximum = &val
 	return nil
