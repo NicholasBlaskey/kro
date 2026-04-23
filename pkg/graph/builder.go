@@ -68,6 +68,18 @@ func NewBuilder(clientConfig *rest.Config, httpClient *http.Client) (*Builder, e
 	return rgBuilder, nil
 }
 
+// NewBuilderWithComponents creates a Builder with pre-configured schema resolver and REST mapper.
+// This enables offline validation and testing with custom components without requiring cluster access.
+func NewBuilderWithComponents(
+	schemaResolver resolver.SchemaResolver,
+	restMapper meta.RESTMapper,
+) *Builder {
+	return &Builder{
+		schemaResolver: schemaResolver,
+		restMapper:     restMapper,
+	}
+}
+
 // Builder is an object that is responsible for constructing and managing
 // resourceGraphDefinitions. It is responsible for transforming the resourceGraphDefinition CRD
 // into a runtime representation that can be used to create the resources in
