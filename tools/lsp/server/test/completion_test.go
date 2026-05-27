@@ -13,11 +13,14 @@ import (
 )
 
 type LSPClient struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Reader
-	stderr io.ReadCloser
-	t      *testing.T
+	cmd         *exec.Cmd
+	stdin       io.WriteCloser
+	stdout      *bufio.Reader
+	stderr      io.ReadCloser
+	t           *testing.T
+	diagnostics map[string][]Diagnostic // URI -> diagnostics
+	responses   chan *Response          // Channel for responses
+	done        chan struct{}           // Channel to signal shutdown
 }
 
 type Request struct {
@@ -52,6 +55,28 @@ type CompletionItem struct {
 	FilterText string `json:"filterText,omitempty"`
 }
 
+type Diagnostic struct {
+	Range struct {
+		Start struct {
+			Line      uint32 `json:"line"`
+			Character uint32 `json:"character"`
+		} `json:"start"`
+		End struct {
+			Line      uint32 `json:"line"`
+			Character uint32 `json:"character"`
+		} `json:"end"`
+	} `json:"range"`
+	Severity *int   `json:"severity,omitempty"`
+	Code     string `json:"code,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Message  string `json:"message"`
+}
+
+type PublishDiagnosticsParams struct {
+	URI         string       `json:"uri"`
+	Diagnostics []Diagnostic `json:"diagnostics"`
+}
+
 func NewLSPClient(t *testing.T) *LSPClient {
 	cmd := exec.Command("/usr/local/bin/kro", "lsp", "server", "--offline")
 
@@ -75,17 +100,23 @@ func NewLSPClient(t *testing.T) *LSPClient {
 	}
 
 	client := &LSPClient{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: bufio.NewReader(stdout),
-		stderr: stderr,
-		t:      t,
+		cmd:         cmd,
+		stdin:       stdin,
+		stdout:      bufio.NewReader(stdout),
+		stderr:      stderr,
+		t:           t,
+		diagnostics: make(map[string][]Diagnostic),
+		responses:   make(chan *Response, 100),
+		done:        make(chan struct{}),
 	}
 
 	// Suppress stderr
 	go func() {
 		io.Copy(io.Discard, stderr)
 	}()
+
+	// Start background goroutine to read all messages
+	go client.messageLoop()
 
 	time.Sleep(300 * time.Millisecond)
 
@@ -335,35 +366,103 @@ func (c *LSPClient) SendNotification(method string, params interface{}) {
 	c.stdin.Write([]byte(msg))
 }
 
+// messageLoop runs in background to read all LSP messages
+// It routes responses to the responses channel and handles notifications (like diagnostics)
+func (c *LSPClient) messageLoop() {
+	defer close(c.responses)
+
+	for {
+		select {
+		case <-c.done:
+			return
+		default:
+		}
+
+		line, err := c.stdout.ReadString('\n')
+		if err != nil {
+			return
+		}
+
+		var length int
+		n, _ := fmt.Sscanf(line, "Content-Length: %d", &length)
+		if n != 1 {
+			continue
+		}
+
+		c.stdout.ReadString('\n') // Empty line
+
+		content := make([]byte, length)
+		_, err = io.ReadFull(c.stdout, content)
+		if err != nil {
+			return
+		}
+
+		// Try to parse as notification first
+		var notif struct {
+			JSONRPC string          `json:"jsonrpc"`
+			Method  string          `json:"method,omitempty"`
+			ID      int             `json:"id,omitempty"`
+			Params  json.RawMessage `json:"params,omitempty"`
+		}
+
+		if err := json.Unmarshal(content, &notif); err != nil {
+			continue
+		}
+
+		// If it has Method but no ID, it's a notification
+		if notif.Method != "" && notif.ID == 0 {
+			// Handle diagnostics notification
+			if notif.Method == "textDocument/publishDiagnostics" {
+				var params PublishDiagnosticsParams
+				if err := json.Unmarshal(notif.Params, &params); err == nil {
+					c.diagnostics[params.URI] = params.Diagnostics
+				}
+			}
+		} else {
+			// It's a response - parse and send to channel
+			var resp Response
+			if err := json.Unmarshal(content, &resp); err == nil {
+				c.responses <- &resp
+			}
+		}
+	}
+}
+
 func (c *LSPClient) ReadResponse() *Response {
-	line, err := c.stdout.ReadString('\n')
-	if err != nil {
+	select {
+	case resp := <-c.responses:
+		return resp
+	case <-time.After(2 * time.Second):
 		return nil
 	}
+}
 
-	var length int
-	n, _ := fmt.Sscanf(line, "Content-Length: %d", &length)
-	if n != 1 {
-		return nil
+// GetDiagnostics returns all diagnostics for all documents
+func (c *LSPClient) GetDiagnostics() []Diagnostic {
+	var all []Diagnostic
+	for _, diags := range c.diagnostics {
+		all = append(all, diags...)
 	}
+	return all
+}
 
-	c.stdout.ReadString('\n') // Empty line
-
-	content := make([]byte, length)
-	_, err = io.ReadFull(c.stdout, content)
-	if err != nil {
-		return nil
+// WaitForDiagnostics waits for diagnostics on a specific URI and returns them
+func (c *LSPClient) WaitForDiagnostics(uri string, expectedCount int) []Diagnostic {
+	// Wait up to 2 seconds
+	for i := 0; i < 40; i++ {
+		time.Sleep(50 * time.Millisecond)
+		if diags, ok := c.diagnostics[uri]; ok {
+			if expectedCount == 0 || len(diags) == expectedCount {
+				return diags
+			}
+		}
 	}
-
-	var resp Response
-	if err := json.Unmarshal(content, &resp); err != nil {
-		return nil
-	}
-
-	return &resp
+	// Return whatever we have
+	return c.diagnostics[uri]
 }
 
 func (c *LSPClient) Close() {
+	close(c.done)
 	c.SendRequest(999, "shutdown", nil)
 	time.Sleep(100 * time.Millisecond)
 	c.cmd.Process.Kill()

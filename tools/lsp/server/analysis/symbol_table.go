@@ -21,15 +21,17 @@ import (
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 	"github.com/kubernetes-sigs/kro/pkg/graph"
 	protocol "github.com/tliron/glsp/protocol_3_16"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 	"sigs.k8s.io/yaml"
 )
 
 // SymbolTable tracks all symbols (resources, schema fields, iterators) in an RGD.
 // It provides fast lookup for completions, go-to-definition, and hover information.
 type SymbolTable struct {
-	Schema    *SchemaSymbol
-	Resources map[string]*ResourceSymbol
-	Scopes    map[string]*ResourceScope
+	Schema          *SchemaSymbol
+	Resources       map[string]*ResourceSymbol
+	Scopes          map[string]*ResourceScope
+	ResourceSchemas map[string]*spec.Schema // OpenAPI schemas for typed CEL validation
 }
 
 // SchemaSymbol represents the instance CRD schema definition
@@ -295,6 +297,82 @@ func extractConcreteFields(obj interface{}, path string, concreteFields map[stri
 		// For arrays, we could extract fields from each element
 		// For now, skip arrays to keep it simple
 		// (most CEL expressions access array elements explicitly, not their keys)
+	}
+}
+
+// GetInstanceSchema converts the symbol table's schema to an OpenAPI schema for CEL validation
+func (st *SymbolTable) GetInstanceSchema() *spec.Schema {
+	if st == nil || st.Schema == nil || len(st.Schema.SpecFields) == 0 {
+		return nil
+	}
+
+	properties := make(map[string]spec.Schema)
+	for fieldName, fieldSymbol := range st.Schema.SpecFields {
+		properties[fieldName] = *simpleTypeToOpenAPISchema(fieldSymbol.Type)
+	}
+
+	return &spec.Schema{
+		SchemaProps: spec.SchemaProps{
+			Type: []string{"object"},
+			Properties: map[string]spec.Schema{
+				"spec": {
+					SchemaProps: spec.SchemaProps{
+						Type:       []string{"object"},
+						Properties: properties,
+					},
+				},
+			},
+		},
+	}
+}
+
+// simpleTypeToOpenAPISchema converts a SimpleSchema type string to OpenAPI schema
+func simpleTypeToOpenAPISchema(typeStr string) *spec.Schema {
+	// Extract base type (strip modifiers like "string | default='hello'")
+	baseType := typeStr
+	if idx := strings.Index(typeStr, " ("); idx > 0 {
+		baseType = typeStr[:idx]
+	}
+	if idx := strings.Index(typeStr, " |"); idx > 0 {
+		baseType = typeStr[:idx]
+	}
+
+	switch baseType {
+	case "string":
+		return &spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"string"}}}
+	case "integer", "int":
+		return &spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"integer"}}}
+	case "boolean", "bool":
+		return &spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"boolean"}}}
+	case "number", "float":
+		return &spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"number"}}}
+	default:
+		// Handle arrays: array[type]
+		if strings.HasPrefix(baseType, "array[") && strings.HasSuffix(baseType, "]") {
+			elemType := baseType[6 : len(baseType)-1]
+			return &spec.Schema{
+				SchemaProps: spec.SchemaProps{
+					Type: []string{"array"},
+					Items: &spec.SchemaOrArray{
+						Schema: simpleTypeToOpenAPISchema(elemType),
+					},
+				},
+			}
+		}
+		// Handle maps: map[keyType]valueType
+		if strings.HasPrefix(baseType, "map[") {
+			return &spec.Schema{
+				SchemaProps: spec.SchemaProps{
+					Type: []string{"object"},
+					AdditionalProperties: &spec.SchemaOrBool{
+						Allows: true,
+						Schema: &spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"object"}}},
+					},
+				},
+			}
+		}
+		// Fallback to object/any
+		return &spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"object"}}}
 	}
 }
 

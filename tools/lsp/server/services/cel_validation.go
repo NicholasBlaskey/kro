@@ -22,6 +22,7 @@ import (
 	"github.com/kro-run/kro/tools/lsp/server/analysis"
 	kcel "github.com/kubernetes-sigs/kro/pkg/cel"
 	protocol "github.com/tliron/glsp/protocol_3_16"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 )
 
 // CELValidator validates CEL expressions and provides diagnostics
@@ -43,17 +44,26 @@ func (cv *CELValidator) ValidateExpression(expr string, position protocol.Positi
 		return nil
 	}
 
-	// Build CEL environment with resources from symbol table
-	resourceIDs := make([]string, 0, len(cv.symbolTable.Resources))
-	for id := range cv.symbolTable.Resources {
-		resourceIDs = append(resourceIDs, id)
+	// Build schema map for typed validation
+	schemas := cv.buildSchemaMap()
+
+	// Create CEL environment - typed if we have schemas, otherwise untyped
+	var env *cel.Env
+	var err error
+
+	if len(schemas) > 0 {
+		// Typed environment with schema information
+		env, err = kcel.TypedEnvironment(schemas)
+	} else {
+		// Fallback to untyped environment (current behavior)
+		resourceIDs := make([]string, 0, len(cv.symbolTable.Resources))
+		for id := range cv.symbolTable.Resources {
+			resourceIDs = append(resourceIDs, id)
+		}
+		resourceIDs = append(resourceIDs, "schema", "self")
+		env, err = kcel.DefaultEnvironment(kcel.WithResourceIDs(resourceIDs))
 	}
 
-	// Add "schema" and "self" special identifiers
-	resourceIDs = append(resourceIDs, "schema", "self")
-
-	// Create CEL environment with resource variables
-	env, err := kcel.DefaultEnvironment(kcel.WithResourceIDs(resourceIDs))
 	if err != nil {
 		// Environment creation failed - return a diagnostic
 		return []protocol.Diagnostic{
@@ -69,15 +79,39 @@ func (cv *CELValidator) ValidateExpression(expr string, position protocol.Positi
 		}
 	}
 
-	// Compile the expression
-	_, issues := env.Compile(expr)
+	// Parse the expression
+	parsedAST, issues := env.Parse(expr)
 	if issues != nil && issues.Err() != nil {
-		// Compilation failed - convert CEL errors to LSP diagnostics
 		return cv.celIssuesToDiagnostics(issues, position, exprStartChar, expr)
 	}
 
-	// Expression compiled successfully
+	// Type check the expression (this catches type errors!)
+	_, issues = env.Check(parsedAST)
+	if issues != nil && issues.Err() != nil {
+		return cv.celIssuesToDiagnostics(issues, position, exprStartChar, expr)
+	}
+
+	// Expression is valid
 	return nil
+}
+
+// buildSchemaMap builds a map of schemas for CEL typed validation
+func (cv *CELValidator) buildSchemaMap() map[string]*spec.Schema {
+	schemas := make(map[string]*spec.Schema)
+
+	// Add instance schema if available
+	if instanceSchema := cv.symbolTable.GetInstanceSchema(); instanceSchema != nil {
+		schemas["schema"] = instanceSchema
+	}
+
+	// Add resource schemas if available
+	if cv.symbolTable.ResourceSchemas != nil {
+		for id, schema := range cv.symbolTable.ResourceSchemas {
+			schemas[id] = schema
+		}
+	}
+
+	return schemas
 }
 
 // celIssuesToDiagnostics converts CEL compilation issues to LSP diagnostics
