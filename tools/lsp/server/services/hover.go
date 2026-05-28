@@ -135,7 +135,7 @@ func (hp *HoverProvider) createResourceHover(symbol *analysis.ResourceSymbol) *p
 			content.WriteString(fmt.Sprintf("- **Name:** `%s`\n", symbol.ExternalRef.Metadata.Name))
 		}
 
-		if symbol.ExternalRef.Metadata.Selector != nil {
+		if symbol.ExternalRef.Metadata.Name != "" {
 			content.WriteString("- **Selector:** Uses label selector\n")
 		}
 

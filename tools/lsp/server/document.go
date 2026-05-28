@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package server
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/go-logr/logr"
+	"github.com/kro-run/kro/tools/lsp/server/analysis"
 	protocol "github.com/tliron/glsp/protocol_3_16"
 	"k8s.io/client-go/rest"
 )
@@ -26,16 +28,18 @@ import (
 // This abstraction allows the DocumentManager to send diagnostics without being
 // tightly coupled to the specific LSP server implementation.
 type NotificationSender interface {
-	PublishDiagnostics(uri string, diagnostics []protocol.Diagnostic)
+	PublishDiagnostics(uri string, version int32, diagnostics []protocol.Diagnostic)
 }
 
 // Document represents a text document being managed by the LSP server.
 // It tracks the document's identity, version for change synchronization,
 // and current content for validation purposes.
 type Document struct {
-	URI     string
-	Version int32
-	Content string
+	URI         string
+	Version     int32
+	Content     string
+	SymbolTable *analysis.SymbolTable
+	PositionMap map[string]protocol.Range
 }
 
 // DocumentManager handles the lifecycle and validation of documents in the LSP server.
@@ -90,9 +94,9 @@ func (dm *DocumentManager) OpenDocument(uri string, version int32, content strin
 	}
 	dm.mutex.Unlock()
 
-	// Trigger validation and send diagnostics to the client
+	// Trigger validation asynchronously to avoid blocking other requests
 	// This provides immediate feedback when a document is opened
-	dm.validateAndPublishDiagnostics(uri)
+	go dm.validateAndPublishDiagnostics(uri)
 }
 
 // UpdateDocument handles the LSP textDocument/didChange notification.
@@ -114,7 +118,7 @@ func (dm *DocumentManager) UpdateDocument(uri string, version int32, content str
 	// Only validate if the document was successfully updated
 	// This provides real-time validation feedback on content changes
 	if shouldValidate {
-		dm.validateAndPublishDiagnostics(uri)
+		go dm.validateAndPublishDiagnostics(uri)
 	}
 }
 
@@ -131,7 +135,7 @@ func (dm *DocumentManager) CloseDocument(uri string) {
 	// Clear diagnostics in the client by sending an empty diagnostics array
 	// This ensures no stale error markers remain after closing the document
 	if dm.notificationSender != nil {
-		dm.notificationSender.PublishDiagnostics(uri, []protocol.Diagnostic{})
+		dm.notificationSender.PublishDiagnostics(uri, 0, []protocol.Diagnostic{})
 	}
 }
 
@@ -161,33 +165,51 @@ func (dm *DocumentManager) validateAndPublishDiagnostics(uri string) {
 	}
 
 	// Perform validation and collect diagnostics
-	diagnostics := dm.validateDocument(doc)
+	diagnostics, symbolTable, positionMap := dm.validateDocument(doc)
+
+	// Update document with symbol table and position map for LSP features
+	dm.mutex.Lock()
+	if d, ok := dm.documents[uri]; ok {
+		d.SymbolTable = symbolTable
+		d.PositionMap = positionMap
+	}
+	dm.mutex.Unlock()
 
 	// Log validation results for debugging and monitoring
 	if len(diagnostics) > 0 {
 		// Log each diagnostic with detailed information
 		for i, diag := range diagnostics {
-			dm.logger.V(1).Info("Diagnostic",
+			severity := "unknown"
+			if diag.Severity != nil {
+				severity = fmt.Sprintf("%d", *diag.Severity)
+			}
+			dm.logger.Info("Publishing diagnostic",
+				"uri", uri,
 				"index", i+1,
 				"line", diag.Range.Start.Line,
+				"severity", severity,
+				"source", diag.Source,
 				"message", diag.Message)
 		}
 	} else {
 		// Log successful validation (no errors found)
-		dm.logger.V(1).Info("No diagnostics found - clearing previous errors")
+		dm.logger.V(1).Info("No diagnostics found - clearing previous errors", "uri", uri)
 	}
 
 	// Send diagnostics to the LSP client for display in the editor
 	// Empty array clears previous diagnostics, non-empty array shows new ones
-	dm.notificationSender.PublishDiagnostics(uri, diagnostics)
+	dm.logger.Info("Calling PublishDiagnostics", "uri", uri, "version", doc.Version, "count", len(diagnostics))
+	dm.notificationSender.PublishDiagnostics(uri, doc.Version, diagnostics)
 }
 
 // validateDocument performs the actual validation of a document's content.
 // This method delegates to the ValidationManager for the heavy lifting of
 // YAML parsing, KRO resource detection, and semantic validation.
-// Returns an array of LSP diagnostics representing validation results.
-func (dm *DocumentManager) validateDocument(doc *Document) []protocol.Diagnostic {
+// Returns diagnostics, symbol table, and position map.
+func (dm *DocumentManager) validateDocument(doc *Document) ([]protocol.Diagnostic, *analysis.SymbolTable, map[string]protocol.Range) {
 	var diagnostics []protocol.Diagnostic
+	var symbolTable *analysis.SymbolTable
+	var positionMap map[string]protocol.Range
 
 	// Only perform validation if a validation manager is available
 	// This handles graceful degradation when validation setup fails
@@ -197,8 +219,10 @@ func (dm *DocumentManager) validateDocument(doc *Document) []protocol.Diagnostic
 		// either online (cluster-connected) or offline validation
 		result := dm.validationManager.ValidateDocument(doc.Content)
 		diagnostics = append(diagnostics, result.Diagnostics...)
+		symbolTable = result.SymbolTable
+		positionMap = result.PositionMap
 	}
 	// If validationManager is nil, return empty diagnostics (no validation)
 
-	return diagnostics
+	return diagnostics, symbolTable, positionMap
 }

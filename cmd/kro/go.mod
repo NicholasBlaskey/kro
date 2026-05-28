@@ -1,6 +1,6 @@
 module github.com/kubernetes-sigs/kro/cmd/kro
 
-go 1.25.0
+go 1.26.0
 
 toolchain go1.25.6
 

@@ -15,6 +15,7 @@
 package parser
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -101,6 +102,119 @@ func (p *YAMLParser) IsKROResource(node *yaml.Node) bool {
 	isKROResource := strings.Contains(apiVersion, "kro.run") && kind == "ResourceGraphDefinition"
 
 	return isKROResource
+}
+
+// BuildPositionMap walks the YAML AST and builds a map of YAML paths to source positions.
+// This enables accurate diagnostic reporting at specific line/column positions.
+// Paths use dot notation for maps and array indices for sequences:
+// - "spec.resources[0].id" for nested map access
+// - "spec.schema.kind" for simple paths
+func (p *YAMLParser) BuildPositionMap(node *yaml.Node) map[string]protocol.Range {
+	positions := make(map[string]protocol.Range)
+	if node == nil {
+		return positions
+	}
+
+	// Start from root (skip document node wrapper if present)
+	rootNode := p.getRootMappingNode(node)
+	if rootNode != nil {
+		p.walkNode(rootNode, "", positions)
+	}
+
+	return positions
+}
+
+// walkNode recursively walks the YAML AST and records positions for each path
+func (p *YAMLParser) walkNode(node *yaml.Node, path string, positions map[string]protocol.Range) {
+	if node == nil {
+		return
+	}
+
+	// Record position for current node
+	if path != "" {
+		positions[path] = p.nodeToRange(node)
+	}
+
+	switch node.Kind {
+	case yaml.MappingNode:
+		p.walkMappingNode(node, path, positions)
+	case yaml.SequenceNode:
+		p.walkSequenceNode(node, path, positions)
+	case yaml.ScalarNode:
+		// Leaf node - position already recorded
+	}
+}
+
+// walkMappingNode walks a YAML mapping (object) and records positions for all fields
+func (p *YAMLParser) walkMappingNode(node *yaml.Node, path string, positions map[string]protocol.Range) {
+	// Mapping nodes have alternating key/value pairs in Content
+	for i := 0; i < len(node.Content); i += 2 {
+		if i+1 >= len(node.Content) {
+			continue
+		}
+
+		keyNode := node.Content[i]
+		valueNode := node.Content[i+1]
+
+		if keyNode.Kind != yaml.ScalarNode {
+			continue
+		}
+
+		// Build path for this field
+		fieldPath := path
+		if fieldPath != "" {
+			fieldPath += "."
+		}
+		fieldPath += keyNode.Value
+
+		// Record the key position
+		positions[fieldPath+"#key"] = p.nodeToRange(keyNode)
+
+		// Walk the value
+		p.walkNode(valueNode, fieldPath, positions)
+	}
+}
+
+// walkSequenceNode walks a YAML sequence (array) and records positions for all elements
+func (p *YAMLParser) walkSequenceNode(node *yaml.Node, path string, positions map[string]protocol.Range) {
+	for i, child := range node.Content {
+		// Build path with array index: path[i] or [i] for root arrays
+		var elementPath string
+		if path != "" {
+			elementPath = fmt.Sprintf("%s[%d]", path, i)
+		} else {
+			elementPath = fmt.Sprintf("[%d]", i)
+		}
+
+		p.walkNode(child, elementPath, positions)
+	}
+}
+
+// nodeToRange converts a yaml.Node position to an LSP protocol.Range
+// yaml.v3 uses 1-based line/column, LSP uses 0-based
+func (p *YAMLParser) nodeToRange(node *yaml.Node) protocol.Range {
+	if node == nil {
+		return protocol.Range{}
+	}
+
+	startLine := uint32(node.Line - 1)
+	startChar := uint32(node.Column - 1)
+
+	// Calculate end position based on node value length
+	endLine := startLine
+	endChar := startChar
+	if node.Value != "" {
+		// For scalar nodes, use the value length
+		endChar += uint32(len(node.Value))
+	} else {
+		// For non-scalar nodes, provide a minimal range
+		endChar += 1
+	}
+
+	return protocol.Range{
+		Start: protocol.Position{Line: startLine, Character: startChar},
+		End:   protocol.Position{Line: endLine, Character: endChar},
+	}
 }
 
 // Note: This Parser will be improved in the future with proper diagnostics positioning

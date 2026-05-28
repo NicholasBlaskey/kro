@@ -356,3 +356,10 @@ deploy-kind: ko deploy-kind-helm ## Deploy kro to a kind cluster
 # Default end to end tests uses helm deployments
 .PHONY: test-e2e-kind
 test-e2e-kind: deploy-kind-helm
+.PHONY: lsp-test
+lsp-test: ## Build and install the kro LSP binary
+	cd tools/lsp/server && GOTOOLCHAIN=auto go build -o /tmp/kro-lsp ./cmd/
+	sudo pkill -x kro 2>/dev/null || true
+	sleep 1
+	sudo cp /tmp/kro-lsp /usr/local/bin/kro
+	@echo "Installed. Restart LSP server in IntelliJ."

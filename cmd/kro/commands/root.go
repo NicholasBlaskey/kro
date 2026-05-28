@@ -18,10 +18,12 @@ import (
 	"github.com/spf13/cobra"
 
 	generate "github.com/kubernetes-sigs/kro/cmd/kro/commands/generate"
+	lsp "github.com/kubernetes-sigs/kro/cmd/kro/commands/lsp"
 	validate "github.com/kubernetes-sigs/kro/cmd/kro/commands/validate"
 )
 
 func AddCommands(root *cobra.Command) {
 	generate.AddGenerateCommands(root)
 	validate.AddValidateCommands(root)
+	lsp.AddLSPCommands(root)
 }

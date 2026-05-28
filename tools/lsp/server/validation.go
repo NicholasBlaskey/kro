@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package server
 
 import (
 	"fmt"
 
 	"github.com/go-logr/logr"
-	"github.com/kro-run/kro/api/v1alpha1"
-	"github.com/kro-run/kro/pkg/graph"
+	"github.com/kro-run/kro/tools/lsp/server/analysis"
 	"github.com/kro-run/kro/tools/lsp/server/parser"
+	"github.com/kro-run/kro/tools/lsp/server/services"
+	"github.com/kubernetes-sigs/kro/api/v1alpha1"
+	"github.com/kubernetes-sigs/kro/pkg/graph"
 	protocol "github.com/tliron/glsp/protocol_3_16"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/yaml"
@@ -38,8 +40,10 @@ type ValidationManager struct {
 // ValidationResult represents the outcome of document validation, containing
 // diagnostics (errors, warnings) and an overall error status for LSP clients.
 type ValidationResult struct {
-	Diagnostics []protocol.Diagnostic
-	HasErrors   bool
+	Diagnostics  []protocol.Diagnostic
+	HasErrors    bool
+	SymbolTable  *analysis.SymbolTable
+	PositionMap  map[string]protocol.Range
 }
 
 // NewValidationManager creates a new validation manager with the appropriate mode.
@@ -60,7 +64,7 @@ func NewValidationManager(logger logr.Logger, clientConfig *rest.Config) (*Valid
 
 	// Try to create KRO Builder for online validation
 	// This enables CRD schema validation and CEL expression evaluation
-	builder, err := graph.NewBuilder(clientConfig)
+	builder, err := graph.NewBuilder(clientConfig, nil) // nil httpClient uses default
 	if err != nil {
 		// If builder creation fails, gracefully fall back to offline mode
 		return &ValidationManager{
@@ -110,6 +114,11 @@ func (vm *ValidationManager) ValidateDocument(content string) ValidationResult {
 		return result
 	}
 
+	// Stage 1.5: Build position map from YAML AST
+	// This enables accurate diagnostic positioning later
+	positionMap := vm.yamlParser.BuildPositionMap(parseResult.Node)
+	result.PositionMap = positionMap
+
 	// Stage 2: Check if this is a KRO ResourceGraphDefinition
 	// Only proceed with KRO-specific validation for KRO resources
 	if !vm.yamlParser.IsKROResource(parseResult.Node) {
@@ -127,25 +136,56 @@ func (vm *ValidationManager) ValidateDocument(content string) ValidationResult {
 	}
 
 	// Stage 4: KRO validation (online vs offline mode)
+	var validatedGraph *graph.Graph
 	if vm.builder != nil {
 		// Online mode: Full KRO validation including:
 		// - CRD schema validation against live cluster
 		// - CEL expression validation with cluster context
 		// - Cross-resource dependency validation
 		// - Field type validation against OpenAPI schemas
-		_, err := vm.builder.NewResourceGraphDefinition(rgd)
+		g, err := vm.builder.NewResourceGraphDefinition(rgd)
 		if err != nil {
-			diagnostic := vm.createErrorDiagnostic(0, 0, fmt.Sprintf("KRO validation failed: %s", err.Error()))
-			result.Diagnostics = append(result.Diagnostics, diagnostic)
+			// Use enhanced diagnostics with position mapping
+			diagGen := services.NewDiagnosticGenerator(positionMap)
+			diagnostics := diagGen.GenerateFromError(err)
+			result.Diagnostics = append(result.Diagnostics, diagnostics...)
 			result.HasErrors = true
+		} else {
+			validatedGraph = g
 		}
 	} else {
 		// Offline mode: Basic structure validation only
 		// Limited to static checks without cluster connectivity
 		if err := vm.validateBasicStructure(rgd); err != nil {
-			diagnostic := vm.createErrorDiagnostic(0, 0, fmt.Sprintf("Structure validation failed: %s", err.Error()))
-			result.Diagnostics = append(result.Diagnostics, diagnostic)
+			diagGen := services.NewDiagnosticGenerator(positionMap)
+			diagnostics := diagGen.GenerateFromError(err)
+			result.Diagnostics = append(result.Diagnostics, diagnostics...)
 			result.HasErrors = true
+		}
+	}
+
+	// Stage 5: Build symbol table for completions, hover, and navigation
+	// Only build if validation succeeded or partially succeeded
+	if rgd != nil {
+		symbolTable := analysis.BuildFromRGD(rgd, validatedGraph, positionMap)
+		result.SymbolTable = symbolTable
+		vm.logger.V(1).Info("Built symbol table", "hasSymbolTable", symbolTable != nil, "resourceCount", len(symbolTable.Resources))
+
+		// Stage 6: Validate CEL expressions within the document
+		// This provides real-time CEL syntax and type checking
+		celValidator := services.NewCELValidator(symbolTable)
+		vm.logger.V(1).Info("Starting CEL validation", "hasInstanceSchema", symbolTable.Schema != nil)
+		celDiagnostics := celValidator.ValidateDocument(content)
+		vm.logger.V(1).Info("CEL validation complete", "diagnosticCount", len(celDiagnostics))
+		result.Diagnostics = append(result.Diagnostics, celDiagnostics...)
+		if len(celDiagnostics) > 0 {
+			// CEL errors are also considered errors
+			for _, diag := range celDiagnostics {
+				if diag.Severity != nil && *diag.Severity == protocol.DiagnosticSeverityError {
+					result.HasErrors = true
+					break
+				}
+			}
 		}
 	}
 
