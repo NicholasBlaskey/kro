@@ -1,0 +1,11 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: negative-length-test
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: NegativeLengthTest
+    spec:
+      name: "string | minLength=-1"
+      items: "[]string | minItems=-5"

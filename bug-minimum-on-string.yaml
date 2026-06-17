@@ -1,0 +1,21 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: bug-minimum-string
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: MinTest
+    spec:
+      # BUG: applying minimum to a string type should fail
+      name: string | minimum=10
+
+  resources:
+    - id: configmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: test-${schema.metadata.name}
+        data:
+          name: ${schema.spec.name}

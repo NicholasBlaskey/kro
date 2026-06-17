@@ -1,0 +1,52 @@
+# BUG: Array index access doesn't create dependencies
+# This RGD will validate successfully but fail at runtime
+# because deployment.metadata.name depends on config but no dependency is created
+
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: index-dependency-bug
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: IndexDependencyBugApp
+    spec:
+      configData: string
+
+  resources:
+    # This resource SHOULD be a dependency of deployment, but ISN'T
+    - id: config
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: myconfig
+        data:
+          # Array of names
+          names: '["alpha", "beta", "gamma"]'
+
+    # BUG: This doesn't depend on config, even though it accesses config.data.names[0]
+    - id: deployment
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          # This expression uses array index access
+          name: "${config.data.names[0]}"  # Should create dependency!
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: test
+          template:
+            metadata:
+              labels:
+                app: test
+            spec:
+              containers:
+                - name: nginx
+                  image: nginx
+
+# Expected behavior: deployment depends on config
+# Actual behavior: NO dependency created
+# Result: If deployment is sorted before config in DAG, runtime error "no such attribute: config"

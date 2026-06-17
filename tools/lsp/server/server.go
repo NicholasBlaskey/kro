@@ -137,44 +137,10 @@ func (s *KroServer) PublishDiagnostics(uri string, version int32, diagnostics []
 		return
 	}
 
-	// Build diagnostics as raw map to bypass any struct serialization issues
-	rawDiags := make([]map[string]interface{}, 0, len(diagnostics))
-	for _, d := range diagnostics {
-		diag := map[string]interface{}{
-			"range": map[string]interface{}{
-				"start": map[string]interface{}{
-					"line":      d.Range.Start.Line,
-					"character": d.Range.Start.Character,
-				},
-				"end": map[string]interface{}{
-					"line":      d.Range.End.Line,
-					"character": d.Range.End.Character,
-				},
-			},
-			"message": d.Message,
-		}
-		if d.Severity != nil {
-			diag["severity"] = int(*d.Severity)
-		}
-		if d.Source != nil {
-			diag["source"] = *d.Source
-		}
-		rawDiags = append(rawDiags, diag)
-	}
-
-	params := map[string]interface{}{
-		"uri":         uri,
-		"diagnostics": rawDiags,
-	}
-
-	s.logger.Info("Publishing diagnostics via raw map", "uri", uri, "count", len(diagnostics))
-
-	jsonBytes, _ := json.Marshal(params)
-	s.logger.Info("Raw JSON being sent", "json", string(jsonBytes))
-
-	s.notifyFunc("textDocument/publishDiagnostics", params)
-
-	s.logger.Info("Notification sent successfully")
+	s.notifyFunc(protocol.ServerTextDocumentPublishDiagnostics, protocol.PublishDiagnosticsParams{
+		URI:         uri,
+		Diagnostics: diagnostics,
+	})
 }
 
 // Initialize handles the LSP initialization request from the client.
@@ -182,6 +148,7 @@ func (s *KroServer) PublishDiagnostics(uri string, version int32, diagnostics []
 func (s *KroServer) Initialize(context *glsp.Context, params *protocol.InitializeParams) (any, error) {
 	s.logger.Info("Initializing Kro Language Server")
 	s.currentContext = context
+	s.notifyFunc = context.Notify
 	s.notifyFunc = context.Notify
 
 	// Check if client supports definition links
@@ -209,6 +176,7 @@ func (s *KroServer) Initialize(context *glsp.Context, params *protocol.Initializ
 func (s *KroServer) Initialized(context *glsp.Context, params *protocol.InitializedParams) error {
 	s.logger.Info("Server initialized successfully")
 	s.currentContext = context
+	s.notifyFunc = context.Notify
 	// Set up the document manager to send notifications through this server
 	s.documentManager.SetNotificationSender(s)
 	return nil
@@ -236,6 +204,8 @@ func (s *KroServer) DidOpen(context *glsp.Context, params *protocol.DidOpenTextD
 	version := params.TextDocument.Version // Document version for change tracking
 	content := params.TextDocument.Text    // Full document content
 	s.currentContext = context
+	s.notifyFunc = context.Notify
+	s.notifyFunc = context.Notify
 
 	// Normalize URI to resolve symlinks
 	normalizedURI := normalizeURI(uri)
@@ -258,6 +228,7 @@ func (s *KroServer) DidChange(context *glsp.Context, params *protocol.DidChangeT
 	uri := params.TextDocument.URI         // Document identifier
 	version := params.TextDocument.Version // New document version
 	s.currentContext = context
+	s.notifyFunc = context.Notify
 
 	// No changes to process
 	if len(params.ContentChanges) == 0 {
@@ -303,6 +274,7 @@ func (s *KroServer) DidChange(context *glsp.Context, params *protocol.DidChangeT
 func (s *KroServer) DidClose(context *glsp.Context, params *protocol.DidCloseTextDocumentParams) error {
 	uri := params.TextDocument.URI
 	s.currentContext = context
+	s.notifyFunc = context.Notify
 	// Remove document from management and clear diagnostics
 	s.documentManager.CloseDocument(uri)
 	return nil
@@ -313,6 +285,7 @@ func (s *KroServer) DidClose(context *glsp.Context, params *protocol.DidCloseTex
 func (s *KroServer) DidSave(context *glsp.Context, params *protocol.DidSaveTextDocumentParams) error {
 	uri := params.TextDocument.URI
 	s.currentContext = context
+	s.notifyFunc = context.Notify
 
 	// Re-validate the document with current content
 	if doc, exists := s.documentManager.GetDocument(uri); exists {
@@ -337,7 +310,9 @@ func (s *KroServer) createServerCapabilities() protocol.ServerCapabilities {
 		HoverProvider:      boolPtr(true),
 		DefinitionProvider: boolPtr(true),
 		CompletionProvider: &protocol.CompletionOptions{
-			TriggerCharacters: []string{".", "$", "{"},
+			// CEL triggers: ".", "$", "{"
+			// YAML triggers: " " (after indent), "-" (array element), "\n" (after enter)
+			TriggerCharacters: []string{".", "$", "{", " ", "-", "\n"},
 		},
 		// Future capabilities can be added here:
 		// - CodeActionProvider (quick fixes)
@@ -356,8 +331,14 @@ func (s *KroServer) DidChangeWatchedFiles(_ *glsp.Context, _ *protocol.DidChange
 // This maps LSP protocol methods to server implementation functions.
 func (s *KroServer) Completion(context *glsp.Context, params *protocol.CompletionParams) (any, error) {
 	s.currentContext = context
+	s.notifyFunc = context.Notify
 	uri := params.TextDocument.URI
 	position := params.Position
+
+	// Ensure validation has run so SymbolTable is populated.
+	// Async validation may race with completion requests; this guarantees
+	// completion has access to the symbol table on the first request.
+	s.documentManager.EnsureValidated(uri)
 
 	// Get the document
 	doc, exists := s.documentManager.GetDocument(uri)
@@ -367,7 +348,6 @@ func (s *KroServer) Completion(context *glsp.Context, params *protocol.Completio
 
 	// Get symbol table and position map from document
 	if doc.SymbolTable == nil {
-		// No symbol table yet - validation hasn't completed or failed
 		s.logger.Info("Completion: SymbolTable is nil", "uri", uri)
 		return protocol.CompletionList{
 			IsIncomplete: false,
@@ -422,6 +402,7 @@ func (s *KroServer) Completion(context *glsp.Context, params *protocol.Completio
 // Provides hover information for resource IDs, schema, and special identifiers.
 func (s *KroServer) Hover(context *glsp.Context, params *protocol.HoverParams) (*protocol.Hover, error) {
 	s.currentContext = context
+	s.notifyFunc = context.Notify
 	uri := params.TextDocument.URI
 	position := params.Position
 
@@ -455,6 +436,7 @@ func (s *KroServer) Hover(context *glsp.Context, params *protocol.HoverParams) (
 // Provides go-to-definition for resource IDs, schema, and iterators.
 func (s *KroServer) Definition(context *glsp.Context, params *protocol.DefinitionParams) (any, error) {
 	s.currentContext = context
+	s.notifyFunc = context.Notify
 	uri := params.TextDocument.URI
 	position := params.Position
 

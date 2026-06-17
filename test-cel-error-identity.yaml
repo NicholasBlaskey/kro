@@ -1,0 +1,21 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: cel-error-identity-test
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: CelErrorTest
+    spec:
+      count: integer
+
+  resources:
+    - id: configmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          # CEL error in identity path - divide by zero at runtime
+          name: ${"test-" + string(schema.spec.count / 0)}
+        data:
+          test: "value"

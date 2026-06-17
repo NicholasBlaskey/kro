@@ -18,7 +18,7 @@ This component creates a Java application that processes votes from Redis and st
 ### Apply the ResourceGraphDefinition
 
 ```bash
-kubectl apply -f rg.yaml
+kubectl apply -f rg.kroyaml
 ```
 
 ### Create an instance

@@ -1,0 +1,32 @@
+---
+# RGD that references the CRD with top-level ExternalDocs
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: toplevel-db-test
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: TopLevelDBTest
+    spec:
+      dbName: string
+
+  resources:
+  - id: database
+    template:
+      apiVersion: example.com/v1
+      kind: MyTopLevelDB
+      metadata:
+        name: ${schema.spec.dbName}
+      spec:
+        engine: postgres
+        size: 100
+
+  - id: configmap
+    template:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: ${schema.spec.dbName}-config
+      data:
+        db: ${database.spec.engine}

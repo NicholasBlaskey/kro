@@ -1,0 +1,55 @@
+{
+  "name": "kro-lsp",
+  "displayName": "Kro LSP",
+  "description": "Language support for Kro ResourceGraphDefinition files",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:kro-yaml"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "kro-yaml",
+        "aliases": ["Kro YAML", "kro"],
+        "extensions": [".yaml", ".yml"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "kro-yaml",
+        "scopeName": "source.yaml.kro",
+        "path": "./syntaxes/kro-yaml.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.inline.cel": "cel"
+        }
+      }
+    ],
+    "configuration": {
+      "title": "Kro LSP",
+      "properties": {
+        "kro.lsp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Kro LSP"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^16.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^4.9.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^8.0.0"
+  }
+}

@@ -1,0 +1,24 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: empty-dimension-test
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: EmptyDimensionTest
+    spec:
+      items1: '[]string'
+      items2: '[]string'
+
+  resources:
+    - id: configs
+      forEach:
+        - a: ${schema.spec.items1}
+        - b: ${schema.spec.items2}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: "${a}-${b}"
+        data:
+          combo: "${a}/${b}"

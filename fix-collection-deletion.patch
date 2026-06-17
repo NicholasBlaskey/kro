@@ -1,0 +1,55 @@
+diff --git a/pkg/controller/instance/deletion.go b/pkg/controller/instance/deletion.go
+index xxx..xxx 100644
+--- a/pkg/controller/instance/deletion.go
++++ b/pkg/controller/instance/deletion.go
+@@ -77,8 +77,25 @@ func (c *Controller) planNodesForDeletion(
+ 			continue
+ 		}
+
+ 		isExternal := nodeMeta.Type == graph.NodeTypeExternal || nodeMeta.Type == graph.NodeTypeExternalCollection
++		isFullDeletion := !rcx.Instance.GetDeletionTimestamp().IsZero()
++		isManagedCollection := nodeMeta.Type == graph.NodeTypeCollection
+
++		// During full deletion, managed collections don't need identity resolution.
++		// LIST by labels to find all resources and delete them, skipping CEL evaluation.
++		if isFullDeletion && isManagedCollection {
++			items, err := c.listCollectionItems(rcx, nodeMeta.GVR, rid)
++			if err != nil {
++				state.SetError(err)
++				return nil, fmt.Errorf("failed to list collection items for %s: %w", rid, err)
++			}
++			if len(items) == 0 {
++				state.SetDeleted()
++				continue
++			}
++			node.SetObserved(items)
++			state.SetInProgress()
++			deletionNode = node
++			continue
++		}
++
+ 		// Resolve identity without readiness gating. External nodes use this to
+ 		// locate the resource for observation; managed nodes use it as the deletion target.
+@@ -166,7 +183,17 @@ func (c *Controller) planNodesForDeletion(
+ func (c *Controller) deleteTarget(
+ 	rcx *ReconcileContext,
+ 	node *runtime.Node,
+ 	state *NodeState,
+ ) error {
+-	targets, err := node.DeleteTargets()
++	isFullDeletion := !rcx.Instance.GetDeletionTimestamp().IsZero()
++	isManagedCollection := node.Spec.Meta.Type == graph.NodeTypeCollection
++
++	var targets []*unstructured.Unstructured
++	var err error
++
++	if isFullDeletion && isManagedCollection {
++		// During full deletion, delete all observed collection members
++		// without computing intersection (which requires CEL evaluation)
++		targets = node.GetObserved()
++	} else {
++		targets, err = node.DeleteTargets()
++	}
+ 	if err != nil {
+ 		state.SetError(err)
+ 		return err

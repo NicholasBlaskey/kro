@@ -1,0 +1,48 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: index-dependency-bug
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: IndexDependencyBugApp
+    spec:
+      dummy: string
+
+  resources:
+    - id: config
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: myconfig
+        data:
+          name0: "alpha"
+          name1: "beta"
+          name2: "gamma"
+
+    # BUG: Does deployment depend on config when using map access?
+    - id: deployment
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          # This uses map index access config["name0"]
+          name: "${config.data[\"name0\"]}"
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: test
+          template:
+            metadata:
+              labels:
+                app: test
+            spec:
+              containers:
+                - name: nginx
+                  image: nginx
+
+# Test: Does deployment depend on config?
+# If NOT, topological sort might put deployment before config
+# Result: runtime error "no such attribute: config"

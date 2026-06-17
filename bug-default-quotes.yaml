@@ -1,0 +1,22 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: bug-default-quotes
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: QuoteTest
+    spec:
+      # BUG: quotes in default value are not escaped
+      message: "string | default=hello\"world"
+      name: string
+
+  resources:
+    - id: configmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: test-${schema.metadata.name}
+        data:
+          name: ${schema.spec.name}

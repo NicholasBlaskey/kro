@@ -1,0 +1,20 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: test-negative-length
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: NegativeLengthTest
+    spec:
+      # BUG: What if someone passes negative minLength?
+      name: "string | minLength=-5"
+  resources:
+    - id: cm
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: test
+        data:
+          name: ${schema.spec.name}

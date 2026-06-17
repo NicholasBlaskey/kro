@@ -149,6 +149,34 @@ func (dm *DocumentManager) GetDocument(uri string) (*Document, bool) {
 	return doc, exists
 }
 
+// EnsureValidated ensures the document's SymbolTable is populated by running
+// validation synchronously if it hasn't been built yet. This is needed for
+// completion requests that fire before async validation completes.
+func (dm *DocumentManager) EnsureValidated(uri string) {
+	dm.mutex.RLock()
+	doc, exists := dm.documents[uri]
+	hasSymbolTable := exists && doc.SymbolTable != nil
+	dm.mutex.RUnlock()
+
+	if !exists || hasSymbolTable {
+		return
+	}
+
+	// Run validation synchronously and update the document
+	diagnostics, symbolTable, positionMap := dm.validateDocument(doc)
+	dm.mutex.Lock()
+	if d, ok := dm.documents[uri]; ok {
+		d.SymbolTable = symbolTable
+		d.PositionMap = positionMap
+	}
+	dm.mutex.Unlock()
+
+	// Publish diagnostics so the user still sees errors
+	if dm.notificationSender != nil {
+		dm.notificationSender.PublishDiagnostics(uri, doc.Version, diagnostics)
+	}
+}
+
 // validateAndPublishDiagnostics performs validation on a document and sends results to the client.
 // This is the core method that orchestrates validation and diagnostic reporting.
 // It handles the complete pipeline from document retrieval to client notification.

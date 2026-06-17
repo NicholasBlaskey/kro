@@ -1,0 +1,27 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: bug2-valid
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: ValidTest
+    spec:
+      type: object
+      properties:
+        # All valid defaults
+        count: integer | default=42
+        enabled: boolean | default=true
+        name: string | default=test
+
+  resources:
+    - id: configmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: test-${schema.metadata.name}
+        data:
+          count: ${string(schema.spec.count)}
+          enabled: ${string(schema.spec.enabled)}
+          name: ${schema.spec.name}

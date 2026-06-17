@@ -1,0 +1,31 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: cartesian-overflow-test
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: OverflowTest
+    spec:
+      # Each dimension has 10 values
+      dim1: '[]string'
+      dim2: '[]string'
+      dim3: '[]string'
+      dim4: '[]string'
+      dim5: '[]string'
+
+  resources:
+    - id: configs
+      forEach:
+        - a: ${schema.spec.dim1}
+        - b: ${schema.spec.dim2}
+        - c: ${schema.spec.dim3}
+        - d: ${schema.spec.dim4}
+        - e: ${schema.spec.dim5}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: "${a}-${b}-${c}-${d}-${e}"
+        data:
+          combo: "${a}/${b}/${c}/${d}/${e}"

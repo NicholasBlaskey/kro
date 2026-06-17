@@ -1,0 +1,12 @@
+resources:
+  - id: firstResource
+    config:
+      value: 100
+    # Comment between items
+  - id: secondResource
+    config:
+      nested: true
+    # Another comment
+  - id: thirdResource
+    config:
+      final: value

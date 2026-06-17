@@ -237,6 +237,15 @@ func (rt *DeclTypeProvider) FindStructFieldType(typeName, fieldName string) (*ty
 		}
 	}
 
+	// Allow access to .status and .metadata fields on Kubernetes resources as dynamic types.
+	// Status is a runtime-only subresource not included in OpenAPI schemas by default,
+	// but CEL expressions need to reference status fields for conditions, readiness checks, etc.
+	if fieldName == "status" || fieldName == "metadata" {
+		return &types.FieldType{
+			Type: cel.DynType,
+		}, true
+	}
+
 	return nil, false
 }
 

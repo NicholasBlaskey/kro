@@ -1,0 +1,11 @@
+resources:
+  - id: dataTable
+    template:
+      spec:
+        config:
+          tableName: ${schema.spec.namePrefix}-data-processing-results
+        # Comment at different indentation (aligned with spec)
+    - id: emrRbacRole
+      template:
+        spec:
+          roleArn: arn:aws:iam::123456789012:role/emr-role

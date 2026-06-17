@@ -1,0 +1,22 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: test-enum-edge-cases
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: EnumTest
+    spec:
+      # Test 1: Empty string in enum (line 339 should catch this)
+      status1: "string | enum=active,,done"
+      # Test 2: Enum on number type (line 351 should reject)
+      priority: "number | enum=1.0,2.0,3.0"
+  resources:
+    - id: cm
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: test
+        data:
+          status: ${schema.spec.status1}

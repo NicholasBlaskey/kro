@@ -1,0 +1,7 @@
+apiVersion: kro.run/v1alpha1
+kind: CelErrorForEachTest
+metadata:
+  name: test-foreach-instance
+  namespace: default
+spec:
+  counts: [5, 10, 15]

@@ -1,0 +1,35 @@
+---
+# RGD that references the CRD with ExternalDocs
+# This should trigger the bug when kro tries to resolve the schema
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: database-with-backup
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: DatabaseWithBackup
+    spec:
+      dbName: string
+      backupEnabled: boolean | default=true
+
+  resources:
+  - id: database
+    template:
+      apiVersion: example.com/v1
+      kind: MyDatabase
+      metadata:
+        name: ${schema.spec.dbName}
+      spec:
+        engine: postgres
+        size: 100
+
+  - id: configmap
+    template:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: ${schema.spec.dbName}-config
+      data:
+        database: ${database.spec.engine}
+        backup: ${string(schema.spec.backupEnabled)}

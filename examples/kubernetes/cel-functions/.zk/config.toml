@@ -1,0 +1,8 @@
+[note]
+filename = "{{id}}"
+extension = "md"
+template = "default.md"
+
+[lsp.diagnostics]
+wiki-title = "hint"
+dead-link = "error"

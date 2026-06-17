@@ -17,7 +17,7 @@ This component creates an AWS ElastiCache Serverless Redis cache with security g
 ### Apply the ResourceGraphDefinition
 
 ```bash
-kubectl apply -f rg.yaml
+kubectl apply -f rg.kroyaml
 ```
 
 ### Create an instance

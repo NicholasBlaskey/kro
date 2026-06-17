@@ -1,0 +1,28 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: cel-foreach-error
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: TestCELForEachError
+    spec:
+      items:
+        type: array
+        items:
+          type: object
+          properties:
+            name:
+              type: string
+            value:
+              type: integer
+  resources:
+    - id: configmaps
+      forEach:
+        - '${schema.spec.items.map(item, {"name": item.name, "divResult": item.value / 0})}'
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: '${forEach.name}'
+      data:
+        result: '${forEach.divResult}'

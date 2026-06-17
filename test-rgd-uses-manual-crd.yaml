@@ -1,0 +1,23 @@
+---
+# RGD that references the manually created instance CRD
+# This will force kro to call getSchemaWithoutStatus on our CRD with ExternalDocs
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: external-bug-test
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: ExternalBugTest
+    spec:
+      testField: string
+
+  resources:
+  - id: configmap
+    template:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: test-${schema.spec.testField}
+      data:
+        value: ${schema.spec.testField}

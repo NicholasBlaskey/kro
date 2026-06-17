@@ -1,0 +1,10 @@
+apiVersion: kro.run/v1alpha1
+kind: EmptyDimensionTest
+metadata:
+  name: test-empty
+  namespace: default
+spec:
+  # items1 is empty, items2 has values
+  # What happens? Does forEach create 0 items (correct) or fail?
+  items1: []
+  items2: ["x", "y", "z"]

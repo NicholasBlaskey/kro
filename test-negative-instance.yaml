@@ -1,0 +1,7 @@
+apiVersion: kro.run/v1alpha1
+kind: NegativeLengthTest
+metadata:
+  name: test-neg
+  namespace: default
+spec:
+  name: ""

@@ -1,0 +1,26 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: cartesian-overflow-test
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: CartesianTest
+    spec:
+      enabled: boolean
+  resources:
+    - id: items
+      forEach:
+        - name: x
+          items: ${[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]}
+        - name: y
+          items: ${[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]}
+        - name: z
+          items: ${[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]}
+      resource:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: item-${x}-${y}-${z}
+        data:
+          value: "${x}-${y}-${z}"

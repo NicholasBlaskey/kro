@@ -47,21 +47,34 @@ func (cv *CELValidator) ValidateExpression(expr string, position protocol.Positi
 	// Build schema map for typed validation
 	schemas := cv.buildSchemaMap()
 
-	// Create CEL environment - typed if we have schemas, otherwise untyped
+	// Collect all resource IDs (both typed and untyped)
+	allResourceIDs := make([]string, 0, len(cv.symbolTable.Resources))
+	for id := range cv.symbolTable.Resources {
+		allResourceIDs = append(allResourceIDs, id)
+	}
+
+	// Create CEL environment with both typed schemas and untyped resource declarations
 	var env *cel.Env
 	var err error
 
 	if len(schemas) > 0 {
-		// Typed environment with schema information
-		env, err = kcel.TypedEnvironment(schemas)
+		// Typed environment with schema information, plus untyped resource IDs
+		// Resources with schemas get typed validation, others are declared as 'any'
+		untypedResourceIDs := make([]string, 0)
+		for _, id := range allResourceIDs {
+			if _, hasSchema := schemas[id]; !hasSchema {
+				untypedResourceIDs = append(untypedResourceIDs, id)
+			}
+		}
+		untypedResourceIDs = append(untypedResourceIDs, "self") // Add 'self' as untyped
+		env, err = kcel.DefaultEnvironment(
+			kcel.WithTypedResources(schemas),
+			kcel.WithResourceIDs(untypedResourceIDs),
+		)
 	} else {
 		// Fallback to untyped environment (current behavior)
-		resourceIDs := make([]string, 0, len(cv.symbolTable.Resources))
-		for id := range cv.symbolTable.Resources {
-			resourceIDs = append(resourceIDs, id)
-		}
-		resourceIDs = append(resourceIDs, "schema", "self")
-		env, err = kcel.DefaultEnvironment(kcel.WithResourceIDs(resourceIDs))
+		allResourceIDs = append(allResourceIDs, "self")
+		env, err = kcel.DefaultEnvironment(kcel.WithResourceIDs(allResourceIDs))
 	}
 
 	if err != nil {

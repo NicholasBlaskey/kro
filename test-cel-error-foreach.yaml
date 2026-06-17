@@ -1,0 +1,23 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: cel-error-foreach-test
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: CelErrorForEachTest
+    spec:
+      counts: '[]integer'
+
+  resources:
+    - id: configmaps
+      forEach:
+        - idx: ${lists.range(size(schema.spec.counts))}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          # CEL error in identity path within forEach - divide by zero at runtime
+          name: ${"test-" + string(schema.spec.counts[idx] / 0)}
+        data:
+          index: ${string(idx)}

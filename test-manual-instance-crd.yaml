@@ -1,0 +1,47 @@
+---
+# Manually created instance CRD with ExternalDocs that kro will process
+# This simulates what would happen if a CRD (that kro didn't create) has ExternalDocs
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: externalbugtests.kro.run
+  labels:
+    kro.run/graph: external-bug-test
+spec:
+  group: kro.run
+  names:
+    kind: ExternalBugTest
+    plural: externalbugtests
+    singular: externalbugtest
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        externalDocs:
+          description: "This will trigger the nil pointer bug!"
+          url: "https://example.com/docs/bug"
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            properties:
+              testField:
+                type: string
+                description: A test field
+                externalDocs:
+                  description: "Nested ExternalDocs will also panic!"
+                  url: "https://example.com/nested"
+            required:
+            - testField
+          status:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true

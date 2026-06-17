@@ -1,0 +1,93 @@
+## Fix: Skip GetDesiredIdentity for collections during deletion
+
+Collections during deletion don't need identity resolution - they LIST by labels
+and delete everything found. This allows deletion to proceed even with CEL errors
+in forEach identity paths.
+
+### File 1: pkg/runtime/node.go
+
+Add public method to expose observed state:
+
+```go
+// GetObserved returns the currently observed resources for this node.
+func (n *Node) GetObserved() []*unstructured.Unstructured {
+	return n.observed
+}
+```
+
+### File 2: pkg/controller/instance/deletion.go
+
+#### Change 1: planNodesForDeletion (around line 77)
+
+```go
+isExternal := nodeMeta.Type == graph.NodeTypeExternal || nodeMeta.Type == graph.NodeTypeExternalCollection
+isManagedCollection := nodeMeta.Type == graph.NodeTypeCollection
+
+// Managed collections during deletion: skip identity resolution, LIST by labels.
+// This avoids CEL evaluation failures in forEach identity paths.
+if isManagedCollection {
+	items, err := c.listCollectionItems(rcx, nodeMeta.GVR, rid)
+	if err != nil {
+		state.SetError(err)
+		return nil, fmt.Errorf("failed to list collection items for %s: %w", rid, err)
+	}
+	if len(items) == 0 {
+		state.SetDeleted()
+		continue
+	}
+	node.SetObserved(items)
+	state.SetInProgress()
+	deletionNode = node
+	continue
+}
+
+// External nodes and single resources still need identity resolution
+desired, err := node.GetDesiredIdentity()
+// ... rest of existing code
+```
+
+#### Change 2: deleteTarget (around line 172)
+
+```go
+func (c *Controller) deleteTarget(
+	rcx *ReconcileContext,
+	node *runtime.Node,
+	state *NodeState,
+) error {
+	var targets []*unstructured.Unstructured
+	var err error
+
+	if node.Spec.Meta.Type == graph.NodeTypeCollection {
+		// Collections during deletion: delete all observed members.
+		// No intersection needed - we want to delete everything.
+		targets = node.GetObserved()
+	} else {
+		// Single resources: compute targets via DeleteTargets
+		targets, err = node.DeleteTargets()
+		if err != nil {
+			state.SetError(err)
+			return err
+		}
+	}
+
+	if len(targets) == 0 {
+		state.SetDeleted()
+		return nil
+	}
+
+	// ... rest of existing deletion logic unchanged
+```
+
+## What this fixes
+
+1. Collections with CEL errors in forEach identity paths can now be deleted
+2. Skips expensive forEach iteration during deletion
+3. Performance improvement: no wasted CEL evaluation
+4. Cleaner code: collection deletion uses labels only, as intended
+
+## Test validation
+
+Run the test cases:
+- test-cel-error-foreach.yaml + test-cel-error-foreach-instance.yaml
+
+The instance should delete successfully despite the division by zero in metadata.name.

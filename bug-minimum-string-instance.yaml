@@ -1,0 +1,8 @@
+apiVersion: kro.run/v1alpha1
+kind: MinTest
+metadata:
+  name: test-minimum-string
+spec:
+  # According to the schema, this has minimum=10 (which makes no sense for string)
+  # Let's try a short string
+  name: "hi"

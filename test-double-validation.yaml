@@ -1,0 +1,20 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: double-validation-test
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: DoubleValidationTest
+    spec:
+      # Two validation markers - what happens?
+      count: integer | validation="self >= 0" validation="self <= 100"
+  resources:
+    - id: configmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-config
+        data:
+          count: ${string(schema.spec.count)}

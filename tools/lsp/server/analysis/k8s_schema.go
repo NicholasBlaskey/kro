@@ -422,3 +422,10 @@ func (ksp *K8sSchemaProvider) HasKind(kind string) bool {
 	_, ok := ksp.schemas[kind]
 	return ok
 }
+
+// GetFieldsForPath returns field names for a given K8s kind and YAML path
+// This is a convenience wrapper around GetFields
+func (ksp *K8sSchemaProvider) GetFieldsForPath(kind string, path string) []string {
+	fields := ksp.GetFields(kind, path)
+	return fields
+}

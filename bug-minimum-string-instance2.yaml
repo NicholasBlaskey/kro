@@ -1,0 +1,6 @@
+apiVersion: kro.run/v1alpha1
+kind: MinTest
+metadata:
+  name: test-minimum-string-long
+spec:
+  name: "this is a very long string with more than 10 characters"

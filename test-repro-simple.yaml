@@ -1,0 +1,21 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: test-divide-by-zero
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: DivideTest
+    spec:
+      value: integer
+
+  resources:
+    - id: configmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          # Divide by zero in name - should fail validation
+          name: test-${string(schema.spec.value / 0)}
+        data:
+          result: "boom"

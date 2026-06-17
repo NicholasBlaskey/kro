@@ -1,0 +1,6 @@
+apiVersion: kro.run/v1alpha1
+kind: CelErrorForEachTest
+metadata:
+  name: trigger-divide-by-zero
+spec:
+  counts: [1, 2, 3]

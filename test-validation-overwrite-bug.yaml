@@ -1,0 +1,22 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: validation-overwrite-bug
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: ValidationBugTest
+    spec:
+      # This field has BOTH immutable and validation markers
+      # Expected: CRD should have 2 XValidations (immutable + custom)
+      # Actual: validation= overwrites the immutable check
+      status: string | immutable=true validation="self.matches('^(pending|active|done)$')"
+  resources:
+    - id: configmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-config
+        data:
+          status: ${schema.spec.status}

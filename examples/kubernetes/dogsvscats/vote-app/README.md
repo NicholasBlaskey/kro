@@ -17,7 +17,7 @@ This component creates a Python/Flask frontend application that allows users to 
 ### Apply the ResourceGraphDefinition
 
 ```bash
-kubectl apply -f rg.yaml
+kubectl apply -f rg.kroyaml
 ```
 
 ### Create an instance

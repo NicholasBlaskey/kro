@@ -1,0 +1,31 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: bug2-simple
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: BugTest
+    spec:
+      type: object
+      properties:
+        # This should fail - "notanumber" is not a valid integer
+        count: integer | default=notanumber
+
+        # This should fail - "maybe" is not a valid boolean
+        enabled: boolean | default=maybe
+
+        # This one is valid for comparison
+        name: string | default=test
+
+  resources:
+    - id: configmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: test-${schema.metadata.name}
+        data:
+          count: ${string(schema.spec.count)}
+          enabled: ${string(schema.spec.enabled)}
+          name: ${schema.spec.name}

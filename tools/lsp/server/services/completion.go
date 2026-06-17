@@ -16,6 +16,7 @@ package services
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -41,12 +42,23 @@ func NewCompletionProvider(symbolTable *analysis.SymbolTable, positionMap map[st
 
 // ProvideCompletions returns completion items for the given position
 func (cp *CompletionProvider) ProvideCompletions(content string, position protocol.Position) []protocol.CompletionItem {
+	debugCompletion := func(msg string) {
+		if f, err := os.OpenFile("/tmp/kro-lsp-completion.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			fmt.Fprintln(f, msg)
+			f.Close()
+		}
+	}
+	debugCompletion(fmt.Sprintf("=== ProvideCompletions: pos=%v stTable=%v ===", position, cp.symbolTable != nil))
+
 	if cp.symbolTable == nil {
+		debugCompletion("symbolTable is nil")
 		return nil
 	}
+	debugCompletion(fmt.Sprintf("resources=%d", len(cp.symbolTable.Resources)))
 
 	// Analyze what kind of completion is needed
 	ctx := analysis.AnalyzeCompletionContext(content, position, cp.symbolTable)
+	debugCompletion(fmt.Sprintf("ctx.Type=%v ctx.ResourceID=%q ctx.Prefix=%q", ctx.Type, ctx.ResourceID, ctx.Prefix))
 
 	switch ctx.Type {
 	case analysis.CompletionContextResource:
@@ -57,6 +69,8 @@ func (cp *CompletionProvider) ProvideCompletions(content string, position protoc
 		return cp.completeFunctions(ctx.Prefix, position)
 	case analysis.CompletionContextYAMLKey:
 		return cp.completeYAMLKeys(ctx.Prefix, position)
+	case analysis.CompletionContextResourceField:
+		return cp.completeK8sYAMLFields(ctx.ResourceID, ctx.Prefix, position)
 	default:
 		return nil
 	}
@@ -495,6 +509,53 @@ func (cp *CompletionProvider) formatResourceDocumentation(symbol *analysis.Resou
 	}
 
 	return doc.String()
+}
+
+// completeK8sYAMLFields provides completions for K8s resource fields in YAML templates
+// resourceIDEncoded format: "resourceID:kind:path" (e.g., "deployment:Deployment:spec")
+func (cp *CompletionProvider) completeK8sYAMLFields(resourceIDEncoded string, prefix string, position protocol.Position) []protocol.CompletionItem {
+	parts := strings.Split(resourceIDEncoded, ":")
+	if len(parts) < 2 {
+		return nil
+	}
+
+	k8sKind := parts[1]
+	yamlPath := ""
+	if len(parts) >= 3 {
+		yamlPath = parts[2]
+	}
+
+	fields := cp.k8sSchema.GetFieldsForPath(k8sKind, yamlPath)
+	if len(fields) == 0 {
+		return nil
+	}
+
+	// Calculate the range to replace
+	replaceRange := protocol.Range{
+		Start: protocol.Position{
+			Line:      position.Line,
+			Character: position.Character - uint32(len(prefix)),
+		},
+		End: position,
+	}
+
+	var items []protocol.CompletionItem
+	for _, field := range fields {
+		if prefix == "" || strings.HasPrefix(field, prefix) {
+			items = append(items, protocol.CompletionItem{
+				Label:      field,
+				Kind:       completionItemKindPtr(protocol.CompletionItemKindField),
+				Detail:     stringPtr(fmt.Sprintf("%s field", k8sKind)),
+				InsertText: stringPtr(field),
+				TextEdit: &protocol.TextEdit{
+					Range:   replaceRange,
+					NewText: field,
+				},
+			})
+		}
+	}
+
+	return items
 }
 
 // Protocol helpers

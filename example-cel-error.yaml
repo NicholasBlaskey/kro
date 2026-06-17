@@ -1,0 +1,35 @@
+---
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: workers
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Workers
+    spec:
+      count: integer
+
+  resources:
+    - id: pods
+      forEach:
+        - i: ${lists.range(schema.spec.count)}
+      template:
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: ${"pod-" + string(i / 0)}
+          namespace: ${schema.metadata.namespace}
+        spec:
+          containers:
+            - name: app
+              image: nginx
+
+---
+apiVersion: kro.run/v1alpha1
+kind: Workers
+metadata:
+  name: test
+  namespace: default
+spec:
+  count: 3

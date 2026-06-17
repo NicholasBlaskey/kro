@@ -1,0 +1,22 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: bug-enum-quotes
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: EnumQuoteTest
+    spec:
+      # BUG: enum with quotes might not be JSON-escaped properly
+      status: "string | enum=pending,in\"progress,done"
+      name: string
+
+  resources:
+    - id: configmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: test-${schema.metadata.name}
+        data:
+          name: ${schema.spec.name}

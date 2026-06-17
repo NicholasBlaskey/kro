@@ -1,0 +1,12 @@
+resources:
+  - id: dataTable
+    template:
+      spec:
+        config:
+          tableName: ${schema.spec.namePrefix}-data-processing-results
+
+      # EMR on EKS virtual cluster for data processing
+  - id: emrRbacRole
+    template:
+      spec:
+        roleArn: arn:aws:iam::123456789012:role/emr-role

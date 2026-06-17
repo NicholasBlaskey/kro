@@ -1,0 +1,53 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: test-highlight
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: TestHighlight
+    spec:
+      name: string
+      region: string
+      fullDNSName: string
+
+  resources:
+  - id: deployment
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      # HOVER over each word in the expression below:
+      # - 'schema' should highlight only 'schema'
+      # - 'spec' should highlight only 'spec'
+      # - 'name' should highlight only 'name'
+      name: ${schema.spec.name}-deployment
+    spec:
+      replicas: 3
+      selector:
+        matchLabels:
+          app: ${schema.spec.name}
+      template:
+        metadata:
+          labels:
+            app: ${schema.spec.name}
+        spec:
+          containers:
+          - name: main
+            image: nginx
+            env:
+            - name: DNS_NAME
+              # Test multi-segment paths
+              value: ${schema.spec.fullDNSName}
+
+  - id: service
+    apiVersion: v1
+    kind: Service
+    metadata:
+      # Test different segments in the same expression
+      name: ${deployment.metadata.name}-service
+    spec:
+      selector:
+        app: ${schema.spec.name}
+      ports:
+      - port: 80
+        targetPort: 80

@@ -74,7 +74,7 @@ kubectl apply -f aws/elasticache-serverless/rg.yaml
 Apply the main composed RG:
 
 ```bash
-kubectl apply -f aws/dogsvscats-appstack/dogsvscats-rg.yaml
+kubectl apply -f aws/dogsvscats-appstack/dogsvscats-rg.kroyaml
 ```
 
 Validate the RGs statuses are Active:

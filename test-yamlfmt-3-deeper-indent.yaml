@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ResourceGroup
+spec:
+  resources:
+    - id: database
+      template:
+        spec:
+          config:
+            settings:
+              maxConnections: 100
+              # Connection pooling configuration
+    - id: apiServer
+      template:
+        spec:
+          replicas: 3

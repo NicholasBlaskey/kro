@@ -1,0 +1,7 @@
+apiVersion: kro.run/v1alpha1
+kind: DivideTest
+metadata:
+  name: trigger-error
+  namespace: default
+spec:
+  value: 10

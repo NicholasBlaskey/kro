@@ -1,0 +1,22 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: marker-parse-test
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: MarkerTest
+    spec:
+      # End with trailing space after complete marker - does parser handle this?
+      name: "string | required=true "
+      # Or what about just a key with no value?
+      # value: "string | badmarker"
+  resources:
+    - id: cm
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: test
+        data:
+          name: ${schema.spec.name}

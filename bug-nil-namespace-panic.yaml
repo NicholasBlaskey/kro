@@ -1,0 +1,23 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: nil-namespace-panic
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: NilNamespaceTest
+    spec:
+      name: string
+
+  resources:
+    # This will trigger the panic during initial reconciliation
+    # when observed[0] doesn't exist yet
+    - id: configmap
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          # No namespace specified - will try to inherit from instance
+          name: test-${schema.spec.name}
+        data:
+          value: "test"

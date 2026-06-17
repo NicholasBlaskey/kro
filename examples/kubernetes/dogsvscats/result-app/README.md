@@ -18,7 +18,7 @@ This component creates a Node.js application that displays real-time voting resu
 ### Apply the ResourceGraphDefinition
 
 ```bash
-kubectl apply -f rg.yaml
+kubectl apply -f rg.kroyaml
 ```
 
 ### Create an instance

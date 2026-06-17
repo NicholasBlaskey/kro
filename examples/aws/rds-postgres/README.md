@@ -17,7 +17,7 @@ This component creates an AWS RDS PostgreSQL instance with security group and su
 ### Apply the ResourceGraphDefinition
 
 ```bash
-kubectl apply -f rg.yaml
+kubectl apply -f rg.kroyaml
 ```
 
 ### Create an instance

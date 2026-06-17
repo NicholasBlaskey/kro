@@ -1,0 +1,6 @@
+apiVersion: kro.run/v1alpha1
+kind: CelErrorTest
+metadata:
+  name: test-instance
+spec:
+  count: 5

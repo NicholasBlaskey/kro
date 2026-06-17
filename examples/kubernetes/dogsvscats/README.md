@@ -48,7 +48,7 @@ Each component can be deployed independently for testing:
 
 ```bash
 # Deploy vote app with external Redis
-kubectl apply -f vote-app/rg.yaml
+kubectl apply -f vote-app/rg.kroyaml
 kubectl apply -f vote-app/instance.yaml
 ```
 

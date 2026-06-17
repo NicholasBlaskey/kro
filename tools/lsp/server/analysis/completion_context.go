@@ -105,6 +105,12 @@ func AnalyzeCompletionContext(content string, position protocol.Position, symbol
 	}
 
 	// Not in CEL - analyze YAML context
+	// Check if we're inside a K8s resource template
+	if k8sContext := analyzeK8sYAMLContext(content, position, symbolTable); k8sContext != nil {
+		return k8sContext
+	}
+
+	// Default to top-level YAML key completion
 	ctx.Type = CompletionContextYAMLKey
 	ctx.Prefix = extractPrefix(line, col)
 
@@ -316,4 +322,133 @@ func extractResourceIndex(path string) string {
 	// This is a placeholder - in reality we'd need to map back to resource ID
 	// For now, just return empty
 	return ""
+}
+
+// analyzeK8sYAMLContext determines if cursor is inside a K8s resource template
+// and returns context for K8s field completion
+func analyzeK8sYAMLContext(content string, position protocol.Position, symbolTable *SymbolTable) *CompletionContext {
+	if symbolTable == nil || symbolTable.Resources == nil {
+		return nil
+	}
+
+	lines := strings.Split(content, "\n")
+	if int(position.Line) >= len(lines) {
+		return nil
+	}
+
+	// Walk backwards from cursor to find:
+	// 1. Which resource we're in (look for "- id: <resourceId>")
+	// 2. Where we are in the template hierarchy
+
+	var resourceID string
+	var k8sKind string
+	var indent int // Indentation level of current line
+	currentLine := lines[position.Line]
+	indent = countLeadingSpaces(currentLine)
+
+	// Find the resource by looking backwards for "- id: xxx"
+	for i := int(position.Line); i >= 0; i-- {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		// Check for resource ID marker
+		if strings.HasPrefix(trimmed, "- id:") {
+			parts := strings.Fields(trimmed)
+			if len(parts) >= 3 {
+				resourceID = parts[2]
+				break
+			}
+		}
+
+		// If we hit "resources:" we've gone too far back
+		if trimmed == "resources:" {
+			break
+		}
+	}
+
+	if resourceID == "" {
+		return nil
+	}
+
+	resource := symbolTable.LookupResource(resourceID)
+	if resource == nil || resource.K8sKind == "" {
+		return nil
+	}
+
+	k8sKind = resource.K8sKind
+	yamlPath := buildYAMLPath(lines, int(position.Line), indent)
+
+	// Encode resourceID, k8sKind, and yamlPath into ResourceID field
+	// Format: "resourceID:kind:path"
+	encodedResourceID := resourceID + ":" + k8sKind + ":" + yamlPath
+
+	return &CompletionContext{
+		Type:        CompletionContextResourceField,
+		ResourceID:  encodedResourceID,
+		Prefix:      extractPrefix(currentLine, int(position.Character)),
+		InCEL:       false,
+		LineContent: currentLine,
+	}
+}
+
+// countLeadingSpaces counts leading whitespace characters
+func countLeadingSpaces(line string) int {
+	count := 0
+	for _, ch := range line {
+		if ch == ' ' || ch == '\t' {
+			count++
+		} else {
+			break
+		}
+	}
+	return count
+}
+
+// buildYAMLPath constructs the YAML path from template root to the current line
+// For example: "spec.template.spec.containers"
+func buildYAMLPath(lines []string, currentLine int, currentIndent int) string {
+	path := []string{}
+
+	// Walk backwards collecting YAML keys
+	for i := currentLine - 1; i >= 0; i-- {
+		line := lines[i]
+		indent := countLeadingSpaces(line)
+		trimmed := strings.TrimSpace(line)
+
+		// Stop if we hit the resource id line (we've gone past the template marker)
+		if strings.Contains(trimmed, "- id:") {
+			break
+		}
+
+		// Check if this is the RGD resource template marker
+		// It should be at a specific indentation level (after "- id: xxx")
+		// and followed by K8s resource fields (apiVersion, kind, etc)
+		if trimmed == "template:" && i+1 < len(lines) {
+			nextLine := strings.TrimSpace(lines[i+1])
+			// If next line is apiVersion/kind/metadata/spec, this is the resource template marker
+			if strings.HasPrefix(nextLine, "apiVersion:") ||
+			   strings.HasPrefix(nextLine, "kind:") ||
+			   strings.HasPrefix(nextLine, "metadata:") ||
+			   strings.HasPrefix(nextLine, "spec:") {
+				// Found the resource template root - stop here
+				break
+			}
+		}
+
+		// If this line is less indented than current, it's a parent key
+		if indent < currentIndent && strings.HasSuffix(trimmed, ":") {
+			// Extract key name (remove trailing colon)
+			key := strings.TrimSuffix(trimmed, ":")
+			key = strings.Fields(key)[0] // Handle "key: value" cases
+
+			// Skip list markers and numeric indices
+			if key != "-" && !strings.HasPrefix(key, "[") {
+				path = append([]string{key}, path...)
+			}
+
+			currentIndent = indent
+		}
+	}
+
+	return strings.Join(path, ".")
 }
