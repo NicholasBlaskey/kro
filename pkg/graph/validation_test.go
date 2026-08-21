@@ -106,6 +106,8 @@ func TestIsKROReservedWord(t *testing.T) {
 		{"resourcegraphdefinition", true},
 		{"instance", true},
 		{"each", true}, // Reserved for per-item readiness in collections
+		{"runtime", true},
+		{"time", true}, // Reserved: injected `time` CEL variable (KREP-025)
 		{"notReserved", false},
 		{"RESOURCEGRAPHDEFINITION", false}, // Case-sensitive check
 	}

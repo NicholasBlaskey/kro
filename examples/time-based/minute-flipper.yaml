@@ -1,0 +1,59 @@
+# Minute flipper: a resource that flips in and out of existence every minute,
+# driven entirely by the `time` CEL library (KREP-025).
+#
+# How it works:
+#   - includeWhen gates the "flip" ConfigMap on the parity of the current minute:
+#     present on even minutes, absent on odd minutes.
+#   - time.now(evaluateAfter) returns the current time AND asks kro to reconcile
+#     again ~60s later, so the gate re-evaluates every minute with no external
+#     event. The "beacon" ConfigMap is always present and stamps the last
+#     observed time so you can watch the reconcile cadence.
+#
+# Run kro locally against a cluster, then:
+#   kubectl apply -f minute-flipper.yaml
+#   watch -n5 'kubectl get configmap flipper-flip flipper-beacon -o wide 2>&1'
+# The "flipper-flip" ConfigMap appears and disappears about once a minute; the
+# "flipper-beacon" ConfigMap's observedAt advances each reconcile.
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: minute-flipper
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: MinuteFlipper
+    spec:
+      name: string | default="flipper"
+  resources:
+    # Always present. Re-stamps observedAt every reconcile and schedules the
+    # next reconcile ~60s out, which keeps the whole instance ticking.
+    - id: beacon
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.spec.name}-beacon
+          namespace: ${schema.metadata.namespace}
+        data:
+          observedAt: ${string(time.now(time.now(null) + duration("60s")))}
+          currentMinute: ${string(time.now(null).getMinutes())}
+    # Flips in/out of existence every minute based on the minute's parity.
+    - id: flip
+      includeWhen:
+        - ${time.now(time.now(null) + duration("60s")).getMinutes() % 2 == 0}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.spec.name}-flip
+          namespace: ${schema.metadata.namespace}
+        data:
+          note: "present on even minutes, absent on odd minutes"
+---
+apiVersion: kro.run/v1alpha1
+kind: MinuteFlipper
+metadata:
+  name: flipper
+  namespace: default
+spec:
+  name: flipper

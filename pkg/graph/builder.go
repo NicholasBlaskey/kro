@@ -242,7 +242,7 @@ func (b *Builder) CompileSource(src Source) (*Graph, *extv1.JSONSchemaProps, err
 	for name := range nodes {
 		nodeNames = append(nodeNames, name)
 	}
-	allIdentifiers := slices.Concat(nodeNames, []string{SchemaVarName, EachVarName, library.RuntimeVarName})
+	allIdentifiers := slices.Concat(nodeNames, []string{SchemaVarName, EachVarName, library.RuntimeVarName, library.TimeVarName})
 	inspectorEnv, err := krocel.DefaultEnvironment(krocel.WithResourceIDs(allIdentifiers))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create inspector environment: %w", err)
@@ -728,7 +728,7 @@ func buildInstanceNode(
 	// buildConditions; schema and runtime are not resource dependencies.
 	for _, expr := range conditions {
 		for _, ref := range expr.References {
-			if ref == SchemaVarName || ref == library.RuntimeVarName {
+			if ref == SchemaVarName || ref == library.RuntimeVarName || ref == library.TimeVarName {
 				continue
 			}
 			if !slices.Contains(instanceDeps, ref) {
@@ -852,7 +852,7 @@ func inferStatusSchema(
 	}
 
 	// Verify status expressions only reference known resources or schema, and populate References.
-	allowedStatusVars := slices.Concat(nodeNames, []string{SchemaVarName})
+	allowedStatusVars := slices.Concat(nodeNames, []string{SchemaVarName, library.TimeVarName})
 	for _, fieldDescriptor := range fieldDescriptors {
 		expression := fieldDescriptor.Expression
 		result, err := inspectExpressionRestricted(inspector, expression.Original, allowedStatusVars)
@@ -955,7 +955,7 @@ func buildConditions(
 
 	// Record each expression's references (resources, schema, runtime) so the
 	// runtime keeps them in the eval activation.
-	allowedRefs := append(slices.Clone(nodeNames), SchemaVarName, library.RuntimeVarName)
+	allowedRefs := append(slices.Clone(nodeNames), SchemaVarName, library.RuntimeVarName, library.TimeVarName)
 	for _, expr := range conditions {
 		result, err := inspectExpressionRestricted(inspector, expr.Original, allowedRefs)
 		if err != nil {
@@ -1067,7 +1067,8 @@ func extractDependencies(inspector *ast.Inspector, expr *krocel.Expression, iter
 
 	for _, resource := range inspectionResult.ResourceDependencies {
 		// SchemaVarName is the instance spec, not a resource dependency.
-		if resource.ID == SchemaVarName {
+		// TimeVarName is the injected `time` library variable, also not a resource.
+		if resource.ID == SchemaVarName || resource.ID == library.TimeVarName {
 			continue
 		}
 		// The runtime library variable is only injected when evaluating
@@ -1292,7 +1293,7 @@ func validateAndCompileNode(bc *buildContext, node *Node, inspector *ast.Inspect
 		// includeWhen expressions can reference schema plus any resource dependency
 		// already discovered for this node. Resource refs are evaluated at runtime
 		// against observed upstream state.
-		allowedVars := append([]string{SchemaVarName}, node.Meta.Dependencies...)
+		allowedVars := append([]string{SchemaVarName, library.TimeVarName}, node.Meta.Dependencies...)
 		if err := validateConditionReferences(node.IncludeWhen, allowedVars); err != nil {
 			return fmt.Errorf("resource %q includeWhen: %w", node.Meta.ID, err)
 		}

@@ -323,7 +323,33 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (err error
 	//--------------------------------------------------------------
 	// 8. Persist status/conditions
 	//--------------------------------------------------------------
-	return c.updateStatus(rcx)
+	if statusErr := c.updateStatus(rcx); statusErr != nil {
+		return statusErr
+	}
+	// If any expression called time.now(evaluateAfter), schedule the next
+	// reconcile at the earliest requested instant so time-based gates flip
+	// on time rather than waiting for the periodic resync.
+	return requeueForTime(rcx)
+}
+
+// requeueForTime returns a delayed-requeue signal when a time.now(evaluateAfter)
+// call requested one during this reconcile. Past instants are ignored (the
+// value already reflects them), so this never produces a hot loop.
+func requeueForTime(rcx *ReconcileContext) error {
+	r, ok := rcx.Runtime.(interface {
+		EarliestRequeue() (time.Time, bool)
+	})
+	if !ok {
+		return nil
+	}
+	at, ok := r.EarliestRequeue()
+	if !ok {
+		return nil
+	}
+	if d := time.Until(at); d > 0 {
+		return requeue.NeededAfter(nil, d)
+	}
+	return nil
 }
 
 func (c *Controller) ensureManaged(rcx *ReconcileContext) error {

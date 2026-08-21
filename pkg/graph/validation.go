@@ -83,6 +83,7 @@ var (
 		"spec",
 		"status",
 		"this",
+		"time",
 		"variables",
 		"vars",
 		"version",

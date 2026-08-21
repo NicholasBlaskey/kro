@@ -26,6 +26,7 @@ import (
 
 	"github.com/kubernetes-sigs/kro/pkg/metrics"
 
+	"github.com/kubernetes-sigs/kro/pkg/cel/library"
 	"github.com/kubernetes-sigs/kro/pkg/graph"
 	"github.com/kubernetes-sigs/kro/pkg/graph/variable"
 	"github.com/kubernetes-sigs/kro/pkg/runtime/resolver"
@@ -59,6 +60,12 @@ type Node struct {
 	// resourceSchema is the OpenAPI schema for this node's resource type.
 	// Used by buildContext to wrap observed resources with schema-aware CEL values.
 	resourceSchema *spec.Schema
+
+	// timeVal is the per-reconcile value bound to the `time` CEL variable
+	// (library.NewTimeValue). Shared across all nodes in a reconcile so
+	// time.now(evaluateAfter) requests accumulate into one collector. Stored as
+	// any to avoid importing cel into node.go; it is a ref.Val.
+	timeVal any
 }
 
 // defaultIdentityPaths are the template field paths used to identify most resource types.
@@ -129,7 +136,9 @@ func (n *Node) IsIgnored() (bool, error) {
 	for _, expr := range n.includeWhenExprs {
 		for _, ref := range expr.Expression.References {
 			needed[ref] = struct{}{}
-			if ref != graph.InstanceNodeID {
+			// schema (instance) and the injected `time` variable are not resource
+			// dependencies, so they must not be treated as upstream resources.
+			if ref != graph.InstanceNodeID && ref != library.TimeVarName {
 				resourceRefs[ref] = struct{}{}
 			}
 		}

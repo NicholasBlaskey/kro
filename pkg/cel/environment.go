@@ -133,6 +133,9 @@ func BaseDeclarations() []cel.EnvOption {
 			// custom status conditions. The graph builder rejects it outside
 			// the schema's status.conditions block.
 			library.Runtime(),
+			// Time() registers the `time` CEL variable (time.now / time.now(evaluateAfter))
+			// and timestamp date-math helpers (withTime, addDays). See KREP-025.
+			library.Time(),
 		}
 	})
 	return cachedBaseDeclarations

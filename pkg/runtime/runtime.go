@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	krocel "github.com/kubernetes-sigs/kro/pkg/cel"
+	"github.com/kubernetes-sigs/kro/pkg/cel/library"
 	"github.com/kubernetes-sigs/kro/pkg/graph"
 	"github.com/kubernetes-sigs/kro/pkg/graph/variable"
 	"github.com/kubernetes-sigs/kro/pkg/metrics"
@@ -49,6 +50,11 @@ type Runtime struct {
 	instance    *Node
 	applyOrders map[string]int
 	config      graph.Config
+
+	// requeueCollector accumulates evaluateAfter instants requested via
+	// time.now(evaluateAfter) during this reconcile. Read after resolution to
+	// schedule the next reconcile. See EarliestRequeue.
+	requeueCollector *library.RequeueCollector
 }
 
 // Option configures runtime construction.
@@ -90,11 +96,17 @@ func FromGraph(g *graph.Graph, config graph.Config, opts ...Option) (*Runtime, e
 	}()
 
 	rt := &Runtime{
-		order:       g.TopologicalOrder,
-		nodes:       make(map[string]*Node),
-		applyOrders: g.ApplyOrders,
-		config:      config,
+		order:            g.TopologicalOrder,
+		nodes:            make(map[string]*Node),
+		applyOrders:      g.ApplyOrders,
+		config:           config,
+		requeueCollector: &library.RequeueCollector{},
 	}
+
+	// One time snapshot + collector for the whole reconcile, so time.now() is
+	// consistent across expressions and evaluateAfter requests accumulate into
+	// a single requeue point (see EarliestRequeue).
+	timeVal := library.NewTimeValue(time.Now(), rt.requeueCollector)
 
 	// Expression cache for non-iteration expressions only.
 	// Iteration expressions are not cached because they're evaluated per-item
@@ -131,6 +143,7 @@ func FromGraph(g *graph.Graph, config graph.Config, opts ...Option) (*Runtime, e
 			deps:           make(map[string]*Node),
 			config:         config,
 			resourceSchema: g.ResourceSchemas[id],
+			timeVal:        timeVal,
 		}
 	}
 
@@ -140,6 +153,7 @@ func FromGraph(g *graph.Graph, config graph.Config, opts ...Option) (*Runtime, e
 		deps:           make(map[string]*Node),
 		config:         config,
 		resourceSchema: g.ResourceSchemas[graph.InstanceNodeID],
+		timeVal:        timeVal,
 	}
 	if options.instance != nil {
 		instNode.SetObserved([]*unstructured.Unstructured{options.instance.DeepCopy()})
@@ -228,4 +242,14 @@ func (r *Runtime) Instance() *Node {
 func (r *Runtime) ApplyOrder(nodeID string) (int, bool) {
 	order, ok := r.applyOrders[nodeID]
 	return order, ok
+}
+
+// EarliestRequeue returns the earliest future instant requested via
+// time.now(evaluateAfter) during this reconcile, if any. The controller uses
+// it to schedule the next reconcile so time-based gates flip on time.
+func (r *Runtime) EarliestRequeue() (time.Time, bool) {
+	if r.requeueCollector == nil {
+		return time.Time{}, false
+	}
+	return r.requeueCollector.Earliest()
 }

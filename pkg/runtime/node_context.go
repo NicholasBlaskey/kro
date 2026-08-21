@@ -21,6 +21,7 @@ import (
 	"k8s.io/apiserver/pkg/cel/openapi"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
+	"github.com/kubernetes-sigs/kro/pkg/cel/library"
 	celunstructured "github.com/kubernetes-sigs/kro/pkg/cel/unstructured"
 	"github.com/kubernetes-sigs/kro/pkg/graph"
 )
@@ -58,6 +59,12 @@ func (n *Node) buildContext(only ...string) map[string]any {
 			}
 			ctx[depID] = wrapWithSchema(obj, dep.resourceSchema)
 		}
+	}
+	// Bind the `time` variable so time.now()/withTime/addDays are available in
+	// every expression context (templates, includeWhen, forEach, status,
+	// conditions). Filtered out later for expressions that don't reference it.
+	if n.timeVal != nil {
+		ctx[library.TimeVarName] = n.timeVal
 	}
 	return ctx
 }
