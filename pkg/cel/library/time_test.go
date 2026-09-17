@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/ext"
 )
 
 // timeEnv builds a CEL environment with the time library and a dyn `schema`
@@ -27,6 +28,7 @@ func timeEnv(t *testing.T) *cel.Env {
 	t.Helper()
 	env, err := cel.NewEnv(
 		Time(),
+		ext.Bindings(),
 		cel.Variable("schema", cel.DynType),
 	)
 	if err != nil {
@@ -43,7 +45,7 @@ func evalTime(t *testing.T, env *cel.Env, expr string, now time.Time, vars map[s
 	if iss != nil && iss.Err() != nil {
 		t.Fatalf("compile %q: %v", expr, iss.Err())
 	}
-	prog, err := env.Program(ast)
+	prog, err := env.Program(ast, TimeOperatorDecorator())
 	if err != nil {
 		t.Fatalf("program %q: %v", expr, err)
 	}
@@ -245,5 +247,113 @@ func TestClockSharedAcrossValues(t *testing.T) {
 	flip, ok := tv.EarliestFlip()
 	if !ok || !flip.Equal(now.Add(30*time.Second)) {
 		t.Fatalf("flip = %v ok=%v, want %v", flip, ok, now.Add(30*time.Second))
+	}
+}
+
+// --- Order-independence via TimeOperatorDecorator ---
+
+func TestReversedComparisonSolves(t *testing.T) {
+	env := timeEnv(t)
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	openAt := now.Add(5 * time.Minute).Format(time.RFC3339)
+
+	// Kro value on the RIGHT: plain timestamp <= now(). Closed now, flips at +5m.
+	got, tv := evalTime(t, env,
+		`timestamp(schema.openAt) <= time.now()`,
+		now, map[string]any{"schema": map[string]any{"openAt": openAt}})
+	if got != false {
+		t.Fatalf("reversed gate = %v, want false", got)
+	}
+	flip, ok := tv.EarliestFlip()
+	if !ok || !flip.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("flip = %v ok=%v, want %v", flip, ok, now.Add(5*time.Minute))
+	}
+}
+
+func TestReversedAddition(t *testing.T) {
+	env := timeEnv(t)
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	target := now.Add(10 * time.Minute).Format(time.RFC3339)
+
+	// Kro value on the RIGHT of +: duration + now() must stay affine and solve.
+	got, tv := evalTime(t, env,
+		`duration("5m") + time.now() >= timestamp(schema.t)`,
+		now, map[string]any{"schema": map[string]any{"t": target}})
+	if got != false {
+		t.Fatalf("dur+now >= t = %v, want false", got)
+	}
+	flip, ok := tv.EarliestFlip()
+	if !ok || !flip.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("flip = %v ok=%v, want %v (t - 5m)", flip, ok, now.Add(5*time.Minute))
+	}
+}
+
+func TestReversedSubtraction(t *testing.T) {
+	env := timeEnv(t)
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	expiry := now.Add(10 * time.Minute).Format(time.RFC3339)
+
+	// Kro value on the RIGHT of −: plainTs − now() is a remaining-time
+	// duration; gate "less than 5m remaining" flips at expiry − 5m.
+	got, tv := evalTime(t, env,
+		`timestamp(schema.expiry) - time.now() < duration("5m")`,
+		now, map[string]any{"schema": map[string]any{"expiry": expiry}})
+	if got != false {
+		t.Fatalf("remaining < 5m = %v, want false (10m remaining)", got)
+	}
+	flip, ok := tv.EarliestFlip()
+	if !ok || !flip.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("flip = %v ok=%v, want %v", flip, ok, now.Add(5*time.Minute))
+	}
+
+	// ts − dur with the Kro duration on the right: plainTs − (now()−now()) is
+	// exercised via bind to prove taint through indirection is caught.
+	got, tv = evalTime(t, env,
+		`cel.bind(age, time.now() - timestamp(schema.expiry), timestamp(schema.expiry) + age >= timestamp(schema.expiry))`,
+		now, map[string]any{"schema": map[string]any{"expiry": expiry}})
+	if got != false {
+		t.Fatalf("bind-carried comparison = %v, want false (age negative)", got)
+	}
+	if _, ok := tv.EarliestFlip(); !ok {
+		t.Fatalf("bind-carried comparison should record a flip")
+	}
+}
+
+func TestReversedDurationMinusKroTimestampErrors(t *testing.T) {
+	env := timeEnv(t)
+	ast, iss := env.Compile(`duration("5m") - time.now()`)
+	if iss != nil && iss.Err() != nil {
+		return // statically rejected is fine (no dur−ts overload in CEL)
+	}
+	prog, err := env.Program(ast, TimeOperatorDecorator())
+	if err != nil {
+		t.Fatalf("program: %v", err)
+	}
+	_, _, err = prog.Eval(map[string]any{TimeVarName: NewTimeValue(time.Now())})
+	if err == nil {
+		t.Fatalf("expected error subtracting a timestamp from a duration")
+	}
+}
+
+func TestDecoratorLeavesPlainOperatorsUntouched(t *testing.T) {
+	env := timeEnv(t)
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	for expr, want := range map[string]any{
+		`1 < 2`:            true,
+		`2.5 >= 3.0`:       false,
+		`"a" + "b"`:        "ab",
+		`size([1] + [2])`:  int64(2),
+		`10 - 4`:           int64(6),
+		`timestamp(schema.a) < timestamp(schema.b)`: true,
+	} {
+		got, tv := evalTime(t, env, expr, now, map[string]any{"schema": map[string]any{
+			"a": "2026-01-01T00:00:00Z", "b": "2026-06-01T00:00:00Z",
+		}})
+		if _, flip := tv.EarliestFlip(); flip {
+			t.Errorf("%q: plain expression must not record a flip", expr)
+		}
+		if got != want {
+			t.Errorf("%q = %v (%T), want %v", expr, got, got, want)
+		}
 	}
 }

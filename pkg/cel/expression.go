@@ -21,6 +21,7 @@ import (
 	"github.com/google/cel-go/cel"
 
 	"github.com/kubernetes-sigs/kro/pkg/cel/conversion"
+	"github.com/kubernetes-sigs/kro/pkg/cel/library"
 	"github.com/kubernetes-sigs/kro/pkg/metrics"
 )
 
@@ -36,6 +37,9 @@ const (
 func ProgramOptions(costLimit uint64) []cel.ProgramOption {
 	opts := []cel.ProgramOption{
 		cel.InterruptCheckFrequency(DefaultInterruptCheckFrequency),
+		// Order-independent dispatch for comparisons/arithmetic on
+		// time.now()-derived values (KREP-025 requeue solving).
+		library.TimeOperatorDecorator(),
 	}
 	if costLimit > 0 {
 		opts = append(opts, cel.CostLimit(costLimit))
