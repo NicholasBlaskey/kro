@@ -276,14 +276,13 @@ func (t *KroTimestamp) instant() time.Time {
 	return time.Unix(0, t.valueAt()).UTC()
 }
 
-// ConvertToNative supports conversion to time.Time (the value at the fixed
-// now); anything else is rejected to keep Kro time values inside the solver.
+// ConvertToNative is rejected entirely: string(...) is the ONLY exit from
+// the solver (KREP-025). Allowing native conversion would let a bare
+// ${time.now()} render into an object as an implicit escape hatch with no
+// requeue recorded.
 func (t *KroTimestamp) ConvertToNative(typeDesc reflect.Type) (any, error) {
-	if typeDesc == reflect.TypeOf(time.Time{}) || typeDesc.Kind() == reflect.Interface {
-		return t.instant(), nil
-	}
 	return nil, fmt.Errorf(
-		"a kro time value cannot be converted to %v; use string(...) to explicitly opt out of requeue solving", typeDesc)
+		"a time.now()-derived value cannot be converted to %v; wrap it in string(...) to explicitly opt out of requeue solving", typeDesc)
 }
 
 // ConvertToType supports string(ts) as the explicit, no-requeue escape hatch.
@@ -306,6 +305,11 @@ func (t *KroTimestamp) Equal(other ref.Val) ref.Val {
 	}
 	return types.Bool(t.nowCount == o.nowCount && t.offset == o.offset)
 }
+
+// KroTimeSolverValue marks this type as a solver-tracked time value for the
+// render guard in pkg/cel/conversion (matched by anonymous interface to
+// avoid an import cycle).
+func (t *KroTimestamp) KroTimeSolverValue() {}
 
 // Type reports the native CEL timestamp type so runtime overload guards on
 // conversions (string(...)) and object rendering accept the value; operator
@@ -380,14 +384,11 @@ func (d *KroDuration) current() time.Duration {
 	return time.Duration(d.valueAt())
 }
 
-// ConvertToNative supports conversion to time.Duration (the value at the
-// fixed now); anything else is rejected.
+// ConvertToNative is rejected entirely: string(...) is the ONLY exit from
+// the solver (KREP-025); see KroTimestamp.ConvertToNative.
 func (d *KroDuration) ConvertToNative(typeDesc reflect.Type) (any, error) {
-	if typeDesc == reflect.TypeOf(time.Duration(0)) || typeDesc.Kind() == reflect.Interface {
-		return d.current(), nil
-	}
 	return nil, fmt.Errorf(
-		"a kro time value cannot be converted to %v; use string(...) to explicitly opt out of requeue solving", typeDesc)
+		"a time.now()-derived value cannot be converted to %v; wrap it in string(...) to explicitly opt out of requeue solving", typeDesc)
 }
 
 // ConvertToType supports string(dur) as the explicit, no-requeue escape hatch.
@@ -410,6 +411,10 @@ func (d *KroDuration) Equal(other ref.Val) ref.Val {
 	}
 	return types.Bool(d.nowCount == o.nowCount && d.offset == o.offset)
 }
+
+// KroTimeSolverValue marks this type as a solver-tracked time value for the
+// render guard in pkg/cel/conversion; see KroTimestamp.KroTimeSolverValue.
+func (d *KroDuration) KroTimeSolverValue() {}
 
 // Type reports the native CEL duration type; see KroTimestamp.Type.
 func (d *KroDuration) Type() ref.Type { return types.DurationType }
