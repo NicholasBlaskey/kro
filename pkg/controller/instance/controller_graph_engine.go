@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -35,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/cel/openapi"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
@@ -43,6 +45,7 @@ import (
 	"github.com/kubernetes-sigs/kro/pkg/controller/instance/applyset"
 	"github.com/kubernetes-sigs/kro/pkg/dynamiccontroller"
 	"github.com/kubernetes-sigs/kro/pkg/graph/revisions"
+	kroschema "github.com/kubernetes-sigs/kro/pkg/graph/schema"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/compiler"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/executor"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/rgdadapter"
@@ -160,7 +163,7 @@ func (c *Controller) reconcileViaGraphEngine(
 	if c.reconcileConfig.MaxCollectionSize > 0 {
 		rtOpts = append(rtOpts, geruntime.WithMaxCollectionSize(c.reconcileConfig.MaxCollectionSize))
 	}
-	rt, _, err := rgdadapter.BuildRuntimeForInstanceCached(rgd, inst, c.graphEngineCompiler, c.programCache, rtOpts...)
+	rt, _, err := rgdadapter.BuildRuntimeForInstanceCachedWithStatusSchema(rgd, inst, c.graphEngineCompiler, c.programCache, instanceStatusSchema(latest), rtOpts...)
 	if err != nil {
 		metrics.InstanceGraphResolutionFailuresTotal.WithLabelValues(gvrStr, "build_failed").Inc()
 		log.Error(err, "graph-engine: BuildRuntimeForInstance failed")
@@ -313,6 +316,39 @@ func (c *Controller) reconcileViaGraphEngine(
 // namespace/name; cluster-scoped instances key on name alone.
 func instanceKey(inst *unstructured.Unstructured) client.ObjectKey {
 	return client.ObjectKey{Namespace: inst.GetNamespace(), Name: inst.GetName()}
+}
+
+// instanceStatusSchema returns the instance's full OpenAPI schema (spec +
+// inferred status) from the compiled revision's synthesized CRD, converted to a
+// spec.Schema for typing the status patch node in-process. metadata is expanded
+// to the k8s ObjectMeta schema (the raw CRD schema leaves it a bare object, so
+// the status node's metadata.name would not type-check). Returns nil when the
+// revision carries no compiled CRD, so the caller falls back to the resolver.
+func instanceStatusSchema(latest revisions.Entry) *spec.Schema {
+	if latest.CompiledGraph == nil || latest.CompiledGraph.CRD == nil {
+		return nil
+	}
+	crd := latest.CompiledGraph.CRD
+	versions := crd.Spec.Versions
+	if len(versions) == 0 || versions[0].Schema == nil || versions[0].Schema.OpenAPIV3Schema == nil {
+		return nil
+	}
+	sch, err := kroschema.ConvertJSONSchemaPropsToSpecSchema(versions[0].Schema.OpenAPIV3Schema)
+	if err != nil || sch == nil || sch.Properties == nil {
+		return nil
+	}
+	// Expand apiVersion/kind/metadata so the status node's
+	// apiVersion/kind/metadata.name fields type-check (the CRD schema leaves
+	// these unspecified at the top level).
+	metaSchema := kroschema.ObjectMetaSchema
+	if crd.Spec.Scope == apiextensionsv1.ClusterScoped {
+		metaSchema = kroschema.NamespacelessObjectMetaSchema
+	}
+	sch.Properties["metadata"] = metaSchema
+	stringSchema := spec.Schema{SchemaProps: spec.SchemaProps{Type: spec.StringOrArray{"string"}}}
+	sch.Properties["apiVersion"] = stringSchema
+	sch.Properties["kind"] = stringSchema
+	return sch
 }
 
 // notReadyRequeue returns the soft not-ready requeue for key: a capped

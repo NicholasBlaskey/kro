@@ -262,9 +262,18 @@ func (ctx *CompilationContext) buildNode(p *parser.Parser, n *expv1alpha1.Node, 
 	if err != nil {
 		return nil, nil, err
 	}
-	sch, err := ctx.schemaResolver.ResolveSchema(gvk)
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolve schema for %s: %w", gvk, err)
+	// A node schema override supplies the target schema in-process (e.g. the
+	// synthesized status patch node types against the RGD-derived instance
+	// schema kro already holds), so skip the discovery resolve — it is the
+	// stale-prone path an in-place CRD change races.
+	var sch *spec.Schema
+	if override, ok := ctx.nodeSchemaOverrides[n.ID]; ok {
+		sch = override
+	} else {
+		sch, err = ctx.schemaResolver.ResolveSchema(gvk)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve schema for %s: %w", gvk, err)
+		}
 	}
 	mapping, err := ctx.restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	// Memory-cached discovery can still report Fresh after a new CRD appears.

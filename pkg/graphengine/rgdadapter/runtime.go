@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apiserver/pkg/cel/openapi"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 	celunstructured "github.com/kubernetes-sigs/kro/pkg/cel/unstructured"
@@ -93,7 +94,7 @@ func BuildRuntimeForInstance(
 	stampGraphMeta(g, instance)
 
 	// Step 4: compile.
-	compileOpts, err := schemaCompileOpts(rgd, g)
+	compileOpts, err := schemaCompileOpts(rgd, g, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -143,6 +144,24 @@ func BuildRuntimeForInstanceCached(
 	cache ProgramCache,
 	opts ...runtime.Option,
 ) (*runtime.Runtime, *v1alpha1.Graph, error) {
+	return BuildRuntimeForInstanceCachedWithStatusSchema(rgd, instance, c, cache, nil, opts...)
+}
+
+// BuildRuntimeForInstanceCachedWithStatusSchema is BuildRuntimeForInstanceCached
+// with an explicit instance schema (spec + inferred status) used to type the
+// synthesized status patch node in-process, instead of resolving the instance
+// CRD from the apiserver. Callers that hold the compiled revision (which
+// carries the inferred status) pass it here so an in-place status-field add
+// cannot race a stale schema cache. A nil statusSchema falls back to the
+// resolver.
+func BuildRuntimeForInstanceCachedWithStatusSchema(
+	rgd *v1alpha1.ResourceGraphDefinition,
+	instance *unstructured.Unstructured,
+	c Compiler,
+	cache ProgramCache,
+	statusSchema *spec.Schema,
+	opts ...runtime.Option,
+) (*runtime.Runtime, *v1alpha1.Graph, error) {
 	if err := validateBuildInputs(rgd, instance, c); err != nil {
 		return nil, nil, err
 	}
@@ -187,7 +206,7 @@ func BuildRuntimeForInstanceCached(
 		Name:      rgd.Name + "|" + schemaFingerprint(rgd.Spec.Schema),
 	}
 	prog, _, err := cache.Compile(key, g, func(gg *v1alpha1.Graph) (*compiler.Program, error) {
-		compileOpts, optErr := schemaCompileOpts(rgd, gg)
+		compileOpts, optErr := schemaCompileOpts(rgd, gg, statusSchema)
 		if optErr != nil {
 			return nil, optErr
 		}
@@ -272,7 +291,7 @@ func instanceSeedScopeOption(rgd *v1alpha1.ResourceGraphDefinition, schemaData m
 //     gates on the resources it reads) and per-field data-pending-tolerant so
 //     status projects progressively and non-gating, mirroring
 //     ProjectInstanceStatus.
-func schemaCompileOpts(rgd *v1alpha1.ResourceGraphDefinition, g *v1alpha1.Graph) ([]compiler.CompileOption, error) {
+func schemaCompileOpts(rgd *v1alpha1.ResourceGraphDefinition, g *v1alpha1.Graph, instanceSchema *spec.Schema) ([]compiler.CompileOption, error) {
 	opts := []compiler.CompileOption{compiler.WithLiteralNode(SchemaNodeID)}
 	if rgd.Spec.Schema != nil {
 		schemaVarSchema, err := graph.InstanceSchemaForCEL(rgd)
@@ -291,6 +310,14 @@ func schemaCompileOpts(rgd *v1alpha1.ResourceGraphDefinition, g *v1alpha1.Graph)
 				// on its own status write (not generation-guarded on the drift
 				// path). The instance's parent informer already drives reconcile.
 				compiler.WithSelfWatchExempt(StatusPatchNodeID))
+			// Type the status writeback against the RGD-derived instance schema
+			// (spec + inferred status) instead of the apiserver-resolved CRD
+			// schema, so an in-place status-field add cannot race a stale schema
+			// cache. Both the manifest and its type-check now derive from the
+			// same in-memory revision.
+			if instanceSchema != nil {
+				opts = append(opts, compiler.WithNodeSchemaOverride(StatusPatchNodeID, instanceSchema))
+			}
 			break
 		}
 	}
