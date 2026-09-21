@@ -42,6 +42,7 @@ import (
 	controllergraph "github.com/kubernetes-sigs/kro/pkg/controller/graph"
 	"github.com/kubernetes-sigs/kro/pkg/controller/instance/applyset"
 	"github.com/kubernetes-sigs/kro/pkg/dynamiccontroller"
+	"github.com/kubernetes-sigs/kro/pkg/graph/parser"
 	"github.com/kubernetes-sigs/kro/pkg/graph/revisions"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/compiler"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/executor"
@@ -162,6 +163,17 @@ func (c *Controller) reconcileViaGraphEngine(
 	}
 	rt, _, err := rgdadapter.BuildRuntimeForInstanceCached(rgd, inst, c.graphEngineCompiler, c.programCache, rtOpts...)
 	if err != nil {
+		// Status-patch schema-lag (added status field not yet in the resolved
+		// CRD schema): hold InProgress + requeue instead of a frozen ERROR.
+		if isStatusPatchSchemaLag(err) {
+			metrics.InstanceGraphResolutionPendingTotal.WithLabelValues(gvrStr).Inc()
+			log.V(1).Info("graph-engine: status patch references a field the target schema has not caught up to; holding InProgress", "error", err)
+			mark.ResourcesNotReady("waiting for target schema to include author status field: %v", err)
+			if perr := c.persistNodeFreeStatus(ctx, c.instanceClient(inst), inst, wireStatus, v1alpha1.InstanceStateInProgress); perr != nil {
+				log.V(1).Info("graph-engine: failed to persist InProgress status for schema-lag", "error", perr)
+			}
+			return c.notReadyRequeue(instanceKey(inst), fmt.Errorf("%w: %w", executor.ErrNotReady, err))
+		}
 		metrics.InstanceGraphResolutionFailuresTotal.WithLabelValues(gvrStr, "build_failed").Inc()
 		log.Error(err, "graph-engine: BuildRuntimeForInstance failed")
 		markResolutionFailed("graph-engine build failed: %v", err)
@@ -313,6 +325,16 @@ func (c *Controller) reconcileViaGraphEngine(
 // namespace/name; cluster-scoped instances key on name alone.
 func instanceKey(inst *unstructured.Unstructured) client.ObjectKey {
 	return client.ObjectKey{Namespace: inst.GetNamespace(), Name: inst.GetName()}
+}
+
+// isStatusPatchSchemaLag reports a schema-field miss on the status patch node.
+// Scoped to that node so a real missing-field ref on another node still fails hard.
+func isStatusPatchSchemaLag(err error) bool {
+	var buildErr *compiler.BuildNodeError
+	if !errors.As(err, &buildErr) || buildErr.NodeID != rgdadapter.StatusPatchNodeID {
+		return false
+	}
+	return errors.Is(err, parser.ErrSchemaFieldMissing)
 }
 
 // notReadyRequeue returns the soft not-ready requeue for key: a capped

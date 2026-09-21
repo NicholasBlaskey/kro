@@ -49,6 +49,7 @@ import (
 	controllergraph "github.com/kubernetes-sigs/kro/pkg/controller/graph"
 	"github.com/kubernetes-sigs/kro/pkg/controller/instance/applyset"
 	"github.com/kubernetes-sigs/kro/pkg/dynamiccontroller"
+	"github.com/kubernetes-sigs/kro/pkg/graph/parser"
 	"github.com/kubernetes-sigs/kro/pkg/graph/revisions"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/compiler"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/executor"
@@ -762,6 +763,77 @@ func TestReconcileViaGraphEngine_CompilerGuards(t *testing.T) {
 		err := c.reconcileViaGraphEngine(context.Background(), inst, watcher)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "compile error")
+	})
+
+	// s7reg regression: an in-place RGD status-field add can make the compiler
+	// type the synthesized author-status patch node ("instance") against a
+	// target-CRD schema that has not caught up yet, yielding a
+	// BuildNodeError wrapping parser.ErrSchemaFieldMissing. This transient miss
+	// must hold the instance InProgress with its prior status preserved and
+	// requeue soft — NOT flip it to a hard ERROR with frozen status.
+	t.Run("Status-patch schema-lag miss -> soft InProgress + preserved status + soft requeue", func(t *testing.T) {
+		inst := newInstanceObject("demo", "default")
+		// Seed a prior author status field so we can prove it is preserved.
+		inst.Object["status"] = map[string]any{
+			"state": string(v1alpha1.InstanceStateActive),
+			"out":   "alpha",
+		}
+		raw := newControllerTestDynamicClient(t, inst.DeepCopy())
+
+		lagErr := &compiler.BuildNodeError{
+			NodeID: rgdadapter.StatusPatchNodeID,
+			Err:    fmt.Errorf("parse patch payload: error getting field schema for path status.out2: %w", parser.ErrSchemaFieldMissing),
+		}
+		stub := &testStubCompiler{err: lagErr}
+		c, _ := newGraphEngineControllerUnderTest(t, raw, testEmptyRGDSpec(), revisions.RevisionStateActive, stub, nil)
+
+		watcher := &fakeInstanceWatcher{}
+		err := c.reconcileViaGraphEngine(context.Background(), inst, watcher)
+
+		// Soft: a requeue error (not requeue.None, not a hard/fatal error).
+		require.Error(t, err)
+		assert.True(t, requeue.IsRequeueError(err), "schema-lag must requeue softly, not fail hard")
+		assert.True(t, errors.Is(err, executor.ErrNotReady), "schema-lag must be classified ErrNotReady")
+
+		// State held InProgress (not Error) and the prior author field survives.
+		stored := getStoredParentObject(t, raw)
+		status, _, _ := unstructured.NestedMap(stored.Object, "status")
+		require.NotNil(t, status)
+		assert.Equal(t, string(v1alpha1.InstanceStateInProgress), status["state"],
+			"schema-lag must hold InProgress, not flip to Error")
+		assert.Equal(t, "alpha", status["out"], "prior author status field must be preserved")
+
+		// ResourcesReady=False with the schema-wait message (not GraphResolved=False/Error).
+		cond := conditionByType(t, stored, ResourcesReady)
+		assert.Equal(t, metav1.ConditionFalse, cond.Status)
+		require.NotNil(t, cond.Message)
+		assert.Contains(t, *cond.Message, "waiting for target schema")
+	})
+
+	// Control: a schema miss on a NON-status node (a real template/ref) is a
+	// genuine author error and must still fail hard, so the softening cannot
+	// mask real misconfiguration.
+	t.Run("Schema miss on a non-status node -> still hard fails", func(t *testing.T) {
+		inst := newInstanceObject("demo", "default")
+		raw := newControllerTestDynamicClient(t, inst.DeepCopy())
+
+		hardErr := &compiler.BuildNodeError{
+			NodeID: "cm", // a normal template node, not the status patch node
+			Err:    fmt.Errorf("error getting field schema for path spec.bogus: %w", parser.ErrSchemaFieldMissing),
+		}
+		stub := &testStubCompiler{err: hardErr}
+		c, _ := newGraphEngineControllerUnderTest(t, raw, testEmptyRGDSpec(), revisions.RevisionStateActive, stub, nil)
+
+		watcher := &fakeInstanceWatcher{}
+		err := c.reconcileViaGraphEngine(context.Background(), inst, watcher)
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, executor.ErrNotReady), "non-status schema miss must not be softened")
+
+		stored := getStoredParentObject(t, raw)
+		cond := conditionByType(t, stored, GraphResolved)
+		assert.Equal(t, metav1.ConditionFalse, cond.Status)
+		require.NotNil(t, cond.Message)
+		assert.Contains(t, *cond.Message, "graph-engine build failed")
 	})
 }
 

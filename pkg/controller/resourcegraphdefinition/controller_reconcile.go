@@ -26,6 +26,7 @@ import (
 
 	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sschema "k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -352,6 +353,22 @@ func (r *ResourceGraphDefinitionReconciler) ensureResourceGraphDefinitionCRD(ctx
 	return nil
 }
 
+// schemaInvalidator drops a cached schema for a GroupKind. *compiler.Compiler
+// satisfies it; asserted at the call site so rgdadapter.Compiler stays narrow.
+type schemaInvalidator interface {
+	InvalidateSchema(gk k8sschema.GroupKind)
+}
+
+// invalidateInstanceSchema drops the compiler's cached instance-CRD schema after
+// a CRD ensure. No-op when the wired compiler does not expose invalidation.
+func (r *ResourceGraphDefinitionReconciler) invalidateInstanceSchema(crd *v1.CustomResourceDefinition) {
+	inv, ok := r.graphEngineCompiler.(schemaInvalidator)
+	if !ok {
+		return
+	}
+	inv.InvalidateSchema(k8sschema.GroupKind{Group: crd.Spec.Group, Kind: crd.Spec.Names.Kind})
+}
+
 // ensureResourceGraphDefinitionController starts the microcontroller for handling the resources.
 // Child/external resource watches are discovered dynamically by the coordinator from
 // Watch() calls made by instance reconcilers -- no GVR list needed here.
@@ -400,6 +417,9 @@ func (r *ResourceGraphDefinitionReconciler) ensureServingState(
 		mark.KindUnready(err.Error())
 		return processedRGD.TopologicalOrder, resourcesInfo, err
 	}
+	// The instance CRD schema may have just changed; drop the compiler's cached
+	// schema for it so the next instance compile re-fetches instead of failing stale.
+	r.invalidateInstanceSchema(crd)
 	if crd, err = r.crdManager.Get(ctx, crd.Name); err != nil {
 		mark.KindUnready(err.Error())
 	} else {

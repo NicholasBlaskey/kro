@@ -15,6 +15,7 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -239,7 +240,7 @@ func (p *Parser) parseObject(field map[string]any, schema *spec.Schema, path str
 	for fieldName, value := range field {
 		fieldSchema, err := p.getFieldSchema(schema, fieldName)
 		if err != nil {
-			return nil, fmt.Errorf("error getting field schema for path %s: %v", path+"."+fieldName, err)
+			return nil, fmt.Errorf("error getting field schema for path %s: %w", path+"."+fieldName, err)
 		}
 		fieldPath := joinPathAndFieldName(path, fieldName)
 		fieldExpressions, err := p.parseResource(value, fieldSchema, fieldPath)
@@ -377,6 +378,10 @@ func getSchemaTypeName(v any) string {
 	}
 }
 
+// ErrSchemaFieldMissing: a manifest field has no matching property in the
+// target schema. Sentinel so callers can errors.Is a transient schema-lag miss.
+var ErrSchemaFieldMissing = errors.New("schema not found for field")
+
 func (p *Parser) getFieldSchema(s *spec.Schema, field string) (*spec.Schema, error) {
 	if result := p.schemas.LookupField(s, field); result != nil {
 		return result, nil
@@ -386,7 +391,7 @@ func (p *Parser) getFieldSchema(s *spec.Schema, field string) (*spec.Schema, err
 		return result, nil
 	}
 
-	return nil, fmt.Errorf("schema not found for field %s", field)
+	return nil, fmt.Errorf("%w %s", ErrSchemaFieldMissing, field)
 }
 
 func getArrayItemSchema(schema *spec.Schema, path string) (*spec.Schema, error) {

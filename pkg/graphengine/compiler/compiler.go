@@ -40,6 +40,19 @@ import (
 	"github.com/kubernetes-sigs/kro/pkg/graph/variable"
 )
 
+// BuildNodeError wraps a per-node compile failure with the failing node ID, so
+// callers can scope handling to a node (errors.As) while matching the cause (errors.Is).
+type BuildNodeError struct {
+	NodeID string
+	Err    error
+}
+
+func (e *BuildNodeError) Error() string {
+	return fmt.Sprintf("build node %q: %v", e.NodeID, e.Err)
+}
+
+func (e *BuildNodeError) Unwrap() error { return e.Err }
+
 // Compiler turns a v1alpha1.Graph into a compiled Program. It owns the
 // long-lived schema resolver and REST mapper; per Compile it builds a fresh
 // CompilationContext (see context.go) that carries those plus a per-compile
@@ -291,7 +304,7 @@ func (ctx *CompilationContext) compileFrame(apiNodes []expv1alpha1.Node, isRoot 
 		if apiNode.Graph != nil {
 			node, bubble, err := ctx.buildSubgraphNode(apiNode, i)
 			if err != nil {
-				return nil, nil, fmt.Errorf("build node %q: %w", apiNode.ID, err)
+				return nil, nil, &BuildNodeError{NodeID: apiNode.ID, Err: err}
 			}
 			nodes[node.ID] = node
 			captured = append(captured, bubble...)
@@ -299,7 +312,7 @@ func (ctx *CompilationContext) compileFrame(apiNodes []expv1alpha1.Node, isRoot 
 		}
 		built, sch, err := ctx.buildNode(p, apiNode, i)
 		if err != nil {
-			return nil, nil, fmt.Errorf("build node %q: %w", apiNode.ID, err)
+			return nil, nil, &BuildNodeError{NodeID: apiNode.ID, Err: err}
 		}
 		if _, ok := ctx.dataPendingTolerant[built.ID]; ok {
 			built.TolerateDataPending = true
