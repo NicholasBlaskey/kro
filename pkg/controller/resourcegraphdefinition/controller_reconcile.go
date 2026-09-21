@@ -345,12 +345,14 @@ func resourcesInfoFromGraph(processedRGD *graph.Graph) []v1alpha1.ResourceInform
 	return resourcesInfo
 }
 
-// ensureResourceGraphDefinitionCRD ensures the CRD is present and up to date in the cluster.
-func (r *ResourceGraphDefinitionReconciler) ensureResourceGraphDefinitionCRD(ctx context.Context, crd *v1.CustomResourceDefinition, allowBreakingChanges bool) error {
-	if err := r.crdManager.Ensure(ctx, *crd, allowBreakingChanges); err != nil {
-		return newCRDError(err)
+// ensureResourceGraphDefinitionCRD ensures the CRD is present and up to date in
+// the cluster. Returns whether the CRD was created or updated this call.
+func (r *ResourceGraphDefinitionReconciler) ensureResourceGraphDefinitionCRD(ctx context.Context, crd *v1.CustomResourceDefinition, allowBreakingChanges bool) (bool, error) {
+	changed, err := r.crdManager.Ensure(ctx, *crd, allowBreakingChanges)
+	if err != nil {
+		return false, newCRDError(err)
 	}
-	return nil
+	return changed, nil
 }
 
 // schemaInvalidator drops a cached schema for a GroupKind. *compiler.Compiler
@@ -413,13 +415,18 @@ func (r *ResourceGraphDefinitionReconciler) ensureServingState(
 
 	log.V(1).Info("ensuring resource graph definition CRD")
 	allowBreakingChanges := rgd.Annotations[v1alpha1.AllowBreakingChangesAnnotation] == "true"
-	if err := r.ensureResourceGraphDefinitionCRD(ctx, crd, allowBreakingChanges); err != nil {
+	crdChanged, err := r.ensureResourceGraphDefinitionCRD(ctx, crd, allowBreakingChanges)
+	if err != nil {
 		mark.KindUnready(err.Error())
 		return processedRGD.TopologicalOrder, resourcesInfo, err
 	}
-	// The instance CRD schema may have just changed; drop the compiler's cached
-	// schema for it so the next instance compile re-fetches instead of failing stale.
-	r.invalidateInstanceSchema(crd)
+	// Only when the CRD actually changed (created/updated) can its schema have
+	// moved, so invalidate the compiler's cached instance schema only then —
+	// invalidating on every serve reconcile would needlessly defeat the cache
+	// and force repeated discovery re-fetches.
+	if crdChanged {
+		r.invalidateInstanceSchema(crd)
+	}
 	if crd, err = r.crdManager.Get(ctx, crd.Name); err != nil {
 		mark.KindUnready(err.Error())
 	} else {

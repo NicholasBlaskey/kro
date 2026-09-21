@@ -98,9 +98,9 @@ type FakeCRD struct{}
 var _ client.CRDInterface = (*FakeCRD)(nil)
 
 // Ensure ensures a CRD exists, up-to-date, and is ready
-func (f *FakeCRD) Ensure(ctx context.Context, crd v1.CustomResourceDefinition, allowBreakingChanges bool) error {
-	// For testing, just return success
-	return nil
+func (f *FakeCRD) Ensure(ctx context.Context, crd v1.CustomResourceDefinition, allowBreakingChanges bool) (bool, error) {
+	// For testing, report changed=true
+	return true, nil
 }
 
 // Get retrieves a CRD by name

@@ -102,11 +102,14 @@ type stubCache struct {
 	crdInformer *stubInformer
 }
 
-func (s *stubCRDManager) Ensure(_ context.Context, crd extv1.CustomResourceDefinition, allowBreakingChanges bool) error {
+func (s *stubCRDManager) Ensure(_ context.Context, crd extv1.CustomResourceDefinition, allowBreakingChanges bool) (bool, error) {
 	s.ensureCalls++
 	s.lastEnsure = *crd.DeepCopy()
 	s.lastAllowBreaking = allowBreakingChanges
-	return s.ensureErr
+	if s.ensureErr != nil {
+		return false, s.ensureErr
+	}
+	return true, nil
 }
 
 func (s *stubCRDManager) Delete(_ context.Context, name string) error {

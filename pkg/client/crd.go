@@ -44,8 +44,9 @@ var _ CRDClient = &CRDWrapper{}
 
 // CRDClient represents operations for managing CustomResourceDefinitions
 type CRDClient interface {
-	// EnsureCreated ensures a CRD exists and is ready
-	Ensure(ctx context.Context, crd v1.CustomResourceDefinition, allowBreakingChanges bool) error
+	// EnsureCreated ensures a CRD exists and is ready. Returns whether the CRD
+	// was created or updated (false when already up-to-date).
+	Ensure(ctx context.Context, crd v1.CustomResourceDefinition, allowBreakingChanges bool) (bool, error)
 
 	// Delete removes a CRD if it exists
 	Delete(ctx context.Context, name string) error
@@ -61,7 +62,10 @@ type CRDInterface interface {
 	//
 	// If allowBreakingChanges is false and the update contains breaking schema
 	// changes, an error is returned. Set to true to force the update anyway.
-	Ensure(ctx context.Context, crd v1.CustomResourceDefinition, allowBreakingChanges bool) error
+	//
+	// Returns whether the CRD was created or updated (false when already
+	// up-to-date).
+	Ensure(ctx context.Context, crd v1.CustomResourceDefinition, allowBreakingChanges bool) (bool, error)
 
 	// Get retrieves a CRD by name
 	Get(ctx context.Context, name string) (*v1.CustomResourceDefinition, error)
@@ -108,30 +112,30 @@ func newCRDWrapper(cfg CRDWrapperConfig) *CRDWrapper {
 // If a CRD does exist, it will compare the existing CRD with the desired CRD
 // and update it if necessary. If the existing CRD has breaking changes and
 // allowBreakingChanges is false, it will return an error.
-func (w *CRDWrapper) Ensure(ctx context.Context, desired v1.CustomResourceDefinition, allowBreakingChanges bool) error {
+func (w *CRDWrapper) Ensure(ctx context.Context, desired v1.CustomResourceDefinition, allowBreakingChanges bool) (bool, error) {
 	log := logr.FromContext(ctx)
 	existing, err := w.Get(ctx, desired.Name)
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to check for existing CRD: %w", err)
+			return false, fmt.Errorf("failed to check for existing CRD: %w", err)
 		}
 
 		log.Info("Creating CRD", "name", desired.Name)
 		if err := w.create(ctx, desired); err != nil {
-			return fmt.Errorf("failed to create CRD: %w", err)
+			return false, fmt.Errorf("failed to create CRD: %w", err)
 		}
 	} else {
 		// Check ownership first
 		kroOwned, nameMatch, idMatch := metadata.CompareRGDOwnership(existing.ObjectMeta, desired.ObjectMeta)
 		if !kroOwned {
-			return fmt.Errorf(
+			return false, fmt.Errorf(
 				"failed to update CRD %s: CRD already exists and is not owned by KRO", desired.Name,
 			)
 		}
 
 		if !nameMatch {
 			existingRGDName := existing.Labels[metadata.ResourceGraphDefinitionNameLabel]
-			return fmt.Errorf(
+			return false, fmt.Errorf(
 				"failed to update CRD %s: CRD is owned by another ResourceGraphDefinition %s",
 				desired.Name, existingRGDName,
 			)
@@ -149,32 +153,34 @@ func (w *CRDWrapper) Ensure(ctx context.Context, desired v1.CustomResourceDefini
 		// Check for breaking schema changes
 		report, err := crdcompat.CompareVersions(existing.Spec.Versions, desired.Spec.Versions)
 		if err != nil {
-			return fmt.Errorf("failed to check schema compatibility: %w", err)
+			return false, fmt.Errorf("failed to check schema compatibility: %w", err)
 		}
 
 		// If there are no changes at all, we can skip the update
 		namesChanged := !equality.Semantic.DeepEqual(existing.Spec.Names, desired.Spec.Names)
 		if !report.HasChanges() && !namesChanged {
 			log.V(1).Info("CRD is up-to-date", "name", desired.Name)
-			return nil
+			return false, nil
 		}
 
 		// Check for breaking changes
 		if !report.IsCompatible() {
 			log.Info("Breaking changes detected in CRD update", "name", desired.Name, "breakingChanges", len(report.BreakingChanges), "summary", report)
 			if !allowBreakingChanges {
-				return fmt.Errorf("cannot update CRD %s: breaking changes detected: %s", desired.Name, report)
+				return false, fmt.Errorf("cannot update CRD %s: breaking changes detected: %s", desired.Name, report)
 			}
 			log.Info("Allowing breaking changes", "name", desired.Name)
 		}
 
 		log.Info("Updating existing CRD", "name", desired.Name)
 		if err := w.patch(ctx, desired); err != nil {
-			return fmt.Errorf("failed to patch CRD: %w", err)
+			return false, fmt.Errorf("failed to patch CRD: %w", err)
 		}
 	}
 
-	return w.waitForReady(ctx, desired.Name)
+	// The CRD was created or patched (schema/names changed); report changed so
+	// callers can invalidate schema caches keyed on this GroupKind.
+	return true, w.waitForReady(ctx, desired.Name)
 }
 
 // Get retrieves a CRD by name
