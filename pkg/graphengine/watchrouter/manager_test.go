@@ -218,9 +218,9 @@ func TestManagerEventRouting(t *testing.T) {
 	}
 }
 
-// TestManagerSyncTimeout asserts EnsureWatch fails when the fake
-// informer never reports HasSynced. The watch is torn down on timeout so
-// active count stays zero — no zombie watches.
+// TestManagerSyncTimeout asserts EnsureWatch returns an error when the fake
+// informer never reports HasSynced, and that the informer is retained (not torn
+// down) so it can converge in the background and be reused on retry.
 func TestManagerSyncTimeout(t *testing.T) {
 	wm := NewManager(nil, 0, func(Event) {}, logr.Discard())
 	wm.SyncTimeout = 50 * time.Millisecond
@@ -234,9 +234,13 @@ func TestManagerSyncTimeout(t *testing.T) {
 	err := wm.EnsureWatch(gvrA, "owner")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cache sync timeout")
+	// The informer is retained on timeout, not torn down.
+	assert.Equal(t, 1, wm.ActiveWatchCount())
+	assert.False(t, never.stopped.Load(), "informer must not be stopped on sync timeout")
+
+	// An explicit release by the sole owner is what stops it.
+	wm.ReleaseWatch(gvrA, "owner")
 	assert.Equal(t, 0, wm.ActiveWatchCount())
-	// We were the only owner, so ReleaseWatch (called from the
-	// timeout path inside EnsureWatch) tore the informer down.
 	assert.Eventually(t, func() bool {
 		return never.stopped.Load()
 	}, time.Second, 5*time.Millisecond)

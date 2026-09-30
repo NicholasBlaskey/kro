@@ -860,6 +860,10 @@ func TestRegister_EnsureWatchSyncError(t *testing.T) {
 	err := dc.Register(ctx, gvr, handler)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cache sync timeout")
+
+	// The informer is retained on sync timeout (not discarded), so a subsequent
+	// Register reuses it instead of rebuilding and reissuing a full list/watch.
+	assert.Equal(t, 1, dc.watches.ActiveWatchCount(), "informer must be retained after sync timeout")
 }
 
 func TestGetInformer_ReturnsNil_ForMissingWatch(t *testing.T) {

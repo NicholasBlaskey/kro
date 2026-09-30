@@ -492,10 +492,11 @@ func TestWatch_EnsureWatchFailureRollsBack(t *testing.T) {
 	c.RouteEvent(kwatch.Event{Type: kwatch.EventUpdate, GVR: gvrA, Name: "cm-1", Namespace: "ns"})
 	assert.Empty(t, rec.snapshot())
 
-	// The Manager should not retain a broken informer for gvrA.
+	// The Manager retains the informer on sync timeout (it warms in the
+	// background and is reused on retry); only the coordinator's index entry is
+	// rolled back so the failed Watch does not leave a dangling route.
 	if inf := reg.get(gvrA); inf != nil {
-		assert.Eventually(t, inf.IsStopped, time.Second, 5*time.Millisecond,
-			"broken informer should be released after sync failure")
+		assert.False(t, inf.IsStopped(), "informer should be retained after sync timeout")
 	}
 
 	// Observer saw the add then the compensating remove.

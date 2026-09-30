@@ -22,6 +22,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -383,7 +384,34 @@ func TestEnsureWatch_SyncTimeout(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cache sync timeout")
 
-	// Broken watch should be cleaned up so a future EnsureWatch can retry.
+	// The list error here is a plain (non-API) error, treated as transient, so
+	// the informer is retained on timeout (not discarded): its reflector can
+	// converge in the background and later EnsureWatch calls reuse it rather
+	// than rebuilding and reissuing a full list/watch.
+	assert.Equal(t, 1, wm.ActiveWatchCount())
+	wm.Shutdown()
+}
+
+func TestEnsureWatch_SyncTimeout_PermanentErrorReleases(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1.AddMetaToScheme(scheme)
+	client := fake.NewSimpleMetadataClient(scheme)
+	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	// Fail all list calls with a typed Forbidden error: a hard, caller-fixable
+	// failure that would recur on rebuild, so the informer must be released.
+	client.PrependReactor("list", "*", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Group: gvr.Group, Resource: gvr.Resource}, "", fmt.Errorf("denied"))
+	})
+
+	wm := NewWatchManager(client, 1*time.Hour, func(Event) {}, noopLogger())
+	wm.SyncTimeout = 200 * time.Millisecond
+
+	err := wm.EnsureWatch(gvr, "test")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "cache sync failed")
+
+	// Permanent error → informer released, not retained.
 	assert.Equal(t, 0, wm.ActiveWatchCount())
 }
 
@@ -409,14 +437,15 @@ func TestEnsureWatch_SyncTimeout_RetrySucceeds(t *testing.T) {
 
 	err := wm.EnsureWatch(gvr, "test")
 	assert.Error(t, err)
-	assert.Equal(t, 0, wm.ActiveWatchCount(), "broken watch should be removed")
+	assert.Equal(t, 1, wm.ActiveWatchCount(), "informer is retained on timeout")
 
-	// Second call: lists succeed → should create fresh informer and sync.
+	// Second call: lists now succeed. The retained informer's reflector relists
+	// and syncs, so the retry reuses the same informer and returns nil.
 	failList.Store(false)
 	wm.SyncTimeout = 5 * time.Second
 	err = wm.EnsureWatch(gvr, "test")
 	assert.NoError(t, err)
-	assert.Equal(t, 1, wm.ActiveWatchCount(), "retry should succeed with fresh informer")
+	assert.Equal(t, 1, wm.ActiveWatchCount(), "retry reuses the retained informer")
 	wm.Shutdown()
 }
 
@@ -546,7 +575,7 @@ func TestEnsureWatch_AtomicOwnerAndWatch(t *testing.T) {
 	assert.Nil(t, wm.GetInformer(gvr))
 }
 
-func TestEnsureWatch_SyncTimeout_CleansUpOwner(t *testing.T) {
+func TestEnsureWatch_SyncTimeout_RetainsUntilReleased(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = v1.AddMetaToScheme(scheme)
 	client := fake.NewSimpleMetadataClient(scheme)
@@ -563,11 +592,11 @@ func TestEnsureWatch_SyncTimeout_CleansUpOwner(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cache sync timeout")
 
-	// Both the watch and the owner should be cleaned up.
-	assert.Equal(t, 0, wm.ActiveWatchCount())
+	// The informer is retained on timeout, with owner-a still holding it.
+	assert.Equal(t, 1, wm.ActiveWatchCount())
 
-	// Verify owner was removed by checking that a new EnsureWatch + Release
-	// doesn't leave stale state.
+	// The owner is still registered, so releasing it (the sole owner) is what
+	// actually stops the informer.
 	wm.ReleaseWatch(gvr, "owner-a")
 	assert.Equal(t, 0, wm.ActiveWatchCount())
 }

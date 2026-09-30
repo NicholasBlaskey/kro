@@ -19,9 +19,11 @@ import (
 	"fmt"
 	"maps"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -82,6 +84,12 @@ type gvrWatch struct {
 	handlerReg cache.ResourceEventHandlerRegistration
 	cancel     context.CancelFunc
 	log        logr.Logger
+
+	// lastErr holds the most recent list/watch error reported by the
+	// reflector's WatchErrorHandler, or nil if the last attempt did not
+	// report one. Written on the reflector goroutine, read by EnsureWatch,
+	// so access goes through the atomic pointer.
+	lastErr atomic.Pointer[error]
 }
 
 // NewManager creates a Manager. The onEvent callback is invoked for every
@@ -112,11 +120,14 @@ func (m *Manager) SetInformerFactory(f func(schema.GroupVersionResource) cache.S
 // (up to SyncTimeout) so callers can rely on a usable cache on return.
 // Idempotent for a given ownerID.
 //
-// On sync timeout only ownerID's retention is dropped -- the informer is never
-// force-stopped. If another owner attached while we were waiting, the informer
-// keeps running under that owner (and it gets its own chance to wait for
-// sync); if we were the sole owner, releasing empties the owner set and the
-// informer stops naturally.
+// On sync timeout the informer is usually retained (not cancelled) so its
+// reflector keeps converging in the background with bounded backoff rather than
+// being torn down and rebuilt on every retry; a timeout error is still returned
+// so the caller knows the cache is not ready. The exception is a hard,
+// caller-fixable list/watch failure (e.g. Forbidden or resource NotFound): such
+// an informer would keep failing identically on rebuild, so it is released as
+// before. A retained informer is keyed by GVR and reused by later EnsureWatch
+// calls; it stops only when the last owner calls ReleaseWatch (or on Shutdown).
 func (m *Manager) EnsureWatch(gvr schema.GroupVersionResource, ownerID string) error {
 	m.mu.Lock()
 	if m.owners[gvr] == nil {
@@ -148,9 +159,23 @@ func (m *Manager) EnsureWatch(gvr schema.GroupVersionResource, ownerID string) e
 
 	if !cache.WaitForCacheSync(syncCtx.Done(), w.informer.HasSynced) {
 		m.observeInformerSync(gvr, time.Since(syncStart))
-		// Drop our retention only. See the method comment for why we never
-		// force-stop here.
-		m.ReleaseWatch(gvr, ownerID)
+
+		// The sync wait timed out. Decide whether to keep the informer based on
+		// why the initial list/watch has not completed, using the last error
+		// the reflector reported (via SetWatchErrorHandler).
+		//
+		// A hard, caller-fixable failure (e.g. Forbidden, resource NotFound)
+		// will keep failing identically on every rebuild, so there is no value
+		// in keeping the informer; release it as before so a later retry starts
+		// clean. Everything else -- including no reported error at all, which is
+		// the "slow but still listing a large collection" case -- is treated as
+		// transient: retain the informer so its reflector converges in the
+		// background with bounded backoff instead of discarding the partial
+		// cache and reissuing a full list/watch on every reconcile.
+		if lastErr := loadErr(w.lastErr.Load()); isPermanentWatchError(lastErr) {
+			m.ReleaseWatch(gvr, ownerID)
+			return fmt.Errorf("cache sync failed for %s: %w", gvr, lastErr)
+		}
 		return fmt.Errorf("cache sync timeout for %s", gvr)
 	}
 	m.observeInformerSync(gvr, time.Since(syncStart))
@@ -204,6 +229,38 @@ func (m *Manager) Shutdown() {
 
 const defaultSyncTimeout = 30 * time.Second
 
+// loadErr dereferences the atomic error pointer, returning nil when no error
+// has been recorded yet.
+func loadErr(p *error) error {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// isPermanentWatchError reports whether a reflector list/watch error is a hard,
+// caller-fixable failure that would recur identically if the informer were
+// rebuilt, so there is no value in retaining the informer across a sync
+// timeout. It classifies by the API error's structured Status (not by message
+// text). A nil error (no failure reported -- e.g. a still-in-progress initial
+// list of a large collection) is treated as transient and returns false.
+func isPermanentWatchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch {
+	case apierrors.IsForbidden(err),
+		apierrors.IsUnauthorized(err),
+		apierrors.IsNotFound(err),
+		apierrors.IsMethodNotSupported(err),
+		apierrors.IsNotAcceptable(err),
+		apierrors.IsUnsupportedMediaType(err):
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Manager) syncTimeout() time.Duration {
 	if m.SyncTimeout > 0 {
 		return m.SyncTimeout
@@ -234,15 +291,19 @@ func (m *Manager) defaultCreateInformer(gvr schema.GroupVersionResource) cache.S
 func (m *Manager) newWatch(gvr schema.GroupVersionResource) *gvrWatch {
 	inf := m.createInformer(gvr)
 
-	_ = inf.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
-		m.log.V(1).Error(err, "Watch error", "gvr", gvr)
-	})
-
 	w := &gvrWatch{
 		gvr:      gvr,
 		informer: inf,
 		log:      m.log.WithValues("gvr", gvr.String()),
 	}
+
+	// Record the most recent list/watch error so EnsureWatch can distinguish a
+	// slow-but-progressing initial sync (no error / transient error) from a
+	// hard failure (e.g. Forbidden) when its sync wait times out.
+	_ = inf.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
+		w.lastErr.Store(&err)
+		m.log.V(1).Error(err, "Watch error", "gvr", gvr)
+	})
 
 	// Register a single event handler that converts informer callbacks
 	// into normalized Event structs and dispatches via onEvent.
