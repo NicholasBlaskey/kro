@@ -860,6 +860,15 @@ func TestRegister_EnsureWatchSyncError(t *testing.T) {
 	err := dc.Register(ctx, gvr, handler)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cache sync timeout")
+
+	// Register releases the parent retention on timeout so a failed
+	// registration leaves nothing behind (the Manager itself now retains on
+	// timeout; this caller opts out).
+	assert.Equal(t, 0, dc.watches.ActiveWatchCount(), "failed Register must not leave a parent informer behind")
+	_, recorded := dc.parentWatches.Load(gvr)
+	assert.False(t, recorded)
+	_, hasHandler := dc.handlers.Load(gvr)
+	assert.False(t, hasHandler)
 }
 
 func TestGetInformer_ReturnsNil_ForMissingWatch(t *testing.T) {

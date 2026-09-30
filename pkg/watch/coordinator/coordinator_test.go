@@ -471,43 +471,50 @@ func TestDone_AbortWithNoPreviousDropsOwner(t *testing.T) {
 	assert.Equal(t, 1, obs.removeOwner, "aborting a never-committed owner removes it")
 }
 
-// --- EnsureWatch failure / rollback (the reviewer's focus) ------------------
+// --- EnsureWatch sync timeout: the watch stays registered ---------------------
 
-func TestWatch_EnsureWatchFailureRollsBack(t *testing.T) {
+func TestWatch_SyncTimeoutKeepsWatchRegistered(t *testing.T) {
 	obs := &recordingObserver{}
 	// gvrA's informer never syncs → EnsureWatch times out and returns an error.
 	c, rec, reg := newTestCoordinator(t, obs, gvrA)
 
 	w := c.For("owner-a")
 	err := w.Watch(scalarReq("n1", gvrA, "cm-1", "ns"))
-	require.Error(t, err, "a failed informer sync must surface as an error")
-	assert.Contains(t, err.Error(), "ensure watch")
+	require.Error(t, err, "a sync timeout must surface to the caller")
+	assert.ErrorIs(t, err, kwatch.ErrCacheSyncTimeout)
 
-	// Rollback: the entry that was optimistically added must be gone.
+	// The request stays indexed: the node legitimately declares it and the
+	// informer is warming in the background, not gone.
 	s, col := c.WatchRequestCount()
-	assert.Equal(t, 0, s, "failed EnsureWatch must roll back the scalar index entry")
+	assert.Equal(t, 1, s, "sync timeout must not roll back the scalar index entry")
 	assert.Equal(t, 0, col)
 
-	// And an event for the rolled-back target routes to nobody.
+	// Events for the target route to the owner as soon as they arrive.
 	c.RouteEvent(kwatch.Event{Type: kwatch.EventUpdate, GVR: gvrA, Name: "cm-1", Namespace: "ns"})
-	assert.Empty(t, rec.snapshot())
+	assert.ElementsMatch(t, []string{"owner-a"}, rec.snapshot())
 
-	// The Manager should not retain a broken informer for gvrA.
-	if inf := reg.get(gvrA); inf != nil {
-		assert.Eventually(t, inf.IsStopped, time.Second, 5*time.Millisecond,
-			"broken informer should be released after sync failure")
-	}
+	// The Manager retains the informer (owned by the coordinator): its
+	// in-flight initial list is not cancelled.
+	inf := reg.get(gvrA)
+	require.NotNil(t, inf)
+	assert.False(t, inf.IsStopped(), "unsynced informer must be retained after a sync timeout")
 
-	// Observer saw the add then the compensating remove.
+	// Only the add was observed; nothing was compensated.
 	obs.mu.Lock()
-	defer obs.mu.Unlock()
 	assert.Equal(t, 1, obs.addRequest)
-	assert.Equal(t, 1, obs.removeRequest)
-	assert.Equal(t, 1, obs.removeRequestN)
+	assert.Equal(t, 0, obs.removeRequest)
+	obs.mu.Unlock()
+
+	// Abandoning the declaration releases it through the normal orphan path:
+	// the retained informer is stopped when its last declaring node goes away.
+	w.Done(false)
+	s, _ = c.WatchRequestCount()
+	assert.Equal(t, 0, s)
+	assert.Eventually(t, inf.IsStopped, time.Second, 5*time.Millisecond,
+		"orphaned informer must be released once nothing declares it")
 }
 
-func TestWatch_EnsureWatchFailureKeepsPriorCommittedEntry(t *testing.T) {
-	// gvrB's informer never syncs. gvrA is healthy.
+func TestWatch_SyncTimeoutKeepsPriorCommittedEntry(t *testing.T) {
 	c, rec, _ := newTestCoordinator(t, nil, gvrB)
 
 	// Commit a healthy scalar watch on gvrA.
@@ -515,18 +522,17 @@ func TestWatch_EnsureWatchFailureKeepsPriorCommittedEntry(t *testing.T) {
 	require.NoError(t, w.Watch(scalarReq("n1", gvrA, "cm-1", "ns")))
 	w.Done(true)
 
-	// Next cycle re-declares n1 (still fine) and adds a failing gvrB watch.
+	// Next cycle re-declares n1 (still fine) and adds a gvrB watch whose
+	// informer does not sync in time.
 	w2 := c.For("owner-a")
 	require.NoError(t, w2.Watch(scalarReq("n1", gvrA, "cm-1", "ns")))
-	require.Error(t, w2.Watch(scalarReq("n2", gvrB, "dep-1", "ns")))
+	require.ErrorIs(t, w2.Watch(scalarReq("n2", gvrB, "dep-1", "ns")), kwatch.ErrCacheSyncTimeout)
 
-	// The failing add rolled itself back; the committed gvrA entry is intact.
+	// The committed gvrA entry is intact and the warming gvrB entry is indexed.
 	c.RouteEvent(kwatch.Event{Type: kwatch.EventUpdate, GVR: gvrA, Name: "cm-1", Namespace: "ns"})
 	assert.ElementsMatch(t, []string{"owner-a"}, rec.snapshot())
-
-	// gvrB never made it into the index.
 	scalar, _ := c.WatchRequestCount()
-	assert.Equal(t, 1, scalar)
+	assert.Equal(t, 2, scalar)
 }
 
 // --- routing ----------------------------------------------------------------

@@ -394,8 +394,11 @@ func (dc *DynamicController) Register(
 		return nil
 	}
 
-	// Retain the shared informer for the parent and wait for cache sync.
+	// Retain the shared informer for the parent and wait for cache sync. On
+	// timeout EnsureWatch keeps the retention; drop it here so a failed
+	// Register leaves nothing behind and the next attempt starts clean.
 	if err := dc.watches.EnsureWatch(parent, "parent"); err != nil {
+		dc.watches.ReleaseWatch(parent, "parent")
 		dc.handlers.Delete(parent)
 		return fmt.Errorf("add parent handler %s: %w", parent, err)
 	}

@@ -24,6 +24,7 @@
 package coordinator
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -359,6 +360,19 @@ func (c *Coordinator[K]) addWatch(key K, req WatchRequest) error {
 	c.stopWatches(orphaned)
 
 	if err := c.watches.EnsureWatch(gvr, ownerCoordinator); err != nil {
+		if errors.Is(err, kwatch.ErrCacheSyncTimeout) {
+			// The informer is running and retained; only its cache is not
+			// synced yet. Keep the request indexed: the node legitimately
+			// declares it, events route to it once the informer converges,
+			// and the normal orphan path releases the retention when the node
+			// stops declaring it. Tearing it down here would cancel the
+			// in-flight initial list and start it over on the next reconcile.
+			c.log.V(1).Info("Watch registered; informer cache still syncing",
+				"gvr", gvr, "err", err.Error())
+			return fmt.Errorf("ensure watch for %s: %w", gvr, err)
+		}
+		// Any other failure: roll back the optimistic index entry so the
+		// failed Watch does not leave a dangling route.
 		c.mu.Lock()
 		if state, ok := c.owners[key]; ok {
 			if cur, exists := state.current[k]; exists && SameWatchTarget(cur, &req) {

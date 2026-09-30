@@ -16,6 +16,7 @@ package watch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"sync"
@@ -29,6 +30,13 @@ import (
 	"k8s.io/client-go/metadata/metadatainformer"
 	"k8s.io/client-go/tools/cache"
 )
+
+// ErrCacheSyncTimeout is returned (wrapped) by [Manager.EnsureWatch] when the
+// informer's initial cache sync did not complete within SyncTimeout. The
+// informer keeps running and the caller's retention is kept; callers that need
+// a synced cache should call EnsureWatch again later, or release the watch if
+// they no longer want it.
+var ErrCacheSyncTimeout = errors.New("cache sync timeout")
 
 // MetricsRecorder receives observability signals from a [Manager]. It is
 // optional: leave [Manager.Metrics] nil to disable instrumentation. The
@@ -112,11 +120,13 @@ func (m *Manager) SetInformerFactory(f func(schema.GroupVersionResource) cache.S
 // (up to SyncTimeout) so callers can rely on a usable cache on return.
 // Idempotent for a given ownerID.
 //
-// On sync timeout only ownerID's retention is dropped -- the informer is never
-// force-stopped. If another owner attached while we were waiting, the informer
-// keeps running under that owner (and it gets its own chance to wait for
-// sync); if we were the sole owner, releasing empties the owner set and the
-// informer stops naturally.
+// On sync timeout the informer is NOT stopped and ownerID's retention is kept.
+// The reflector keeps its list/watch stream open and converges in the
+// background, so a large collection whose initial list outlives SyncTimeout is
+// not cancelled and re-listed on every call; a later EnsureWatch finds the same
+// informer, usually already synced. The returned error wraps
+// [ErrCacheSyncTimeout]. Callers that do not want to keep a watch they could
+// not sync must ReleaseWatch it themselves.
 func (m *Manager) EnsureWatch(gvr schema.GroupVersionResource, ownerID string) error {
 	m.mu.Lock()
 	if m.owners[gvr] == nil {
@@ -148,10 +158,8 @@ func (m *Manager) EnsureWatch(gvr schema.GroupVersionResource, ownerID string) e
 
 	if !cache.WaitForCacheSync(syncCtx.Done(), w.informer.HasSynced) {
 		m.observeInformerSync(gvr, time.Since(syncStart))
-		// Drop our retention only. See the method comment for why we never
-		// force-stop here.
-		m.ReleaseWatch(gvr, ownerID)
-		return fmt.Errorf("cache sync timeout for %s", gvr)
+		// Keep the informer and our retention (see the method comment).
+		return fmt.Errorf("%w for %s", ErrCacheSyncTimeout, gvr)
 	}
 	m.observeInformerSync(gvr, time.Since(syncStart))
 	return nil
