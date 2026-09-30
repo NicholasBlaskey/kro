@@ -38,6 +38,7 @@ import (
 	"github.com/kubernetes-sigs/kro/pkg/graph/revisions"
 	"github.com/kubernetes-sigs/kro/pkg/metadata"
 	"github.com/kubernetes-sigs/kro/pkg/metrics"
+	kwatch "github.com/kubernetes-sigs/kro/pkg/watch"
 )
 
 var errGraphRevisionsNotResolved = errors.New("graph revisions not resolved")
@@ -368,6 +369,14 @@ func (r *ResourceGraphDefinitionReconciler) ensureResourceGraphDefinitionControl
 
 	err := r.dynamicController.Register(ctx, gvr, controller.Reconcile)
 	if err != nil {
+		if errors.Is(err, kwatch.ErrCacheSyncTimeout) {
+			// The parent watch is registered and retained; only its cache is
+			// still syncing. Record the registration now so that deleting the
+			// RGD before the cache converges still deregisters (and releases)
+			// the parent watch. The error still propagates so the RGD is not
+			// marked active until a later Register finds the cache synced.
+			r.registeredControllers.Store(rgd.UID, true)
+		}
 		return newMicroControllerError(err)
 	}
 	r.registeredControllers.Store(rgd.UID, true)

@@ -859,7 +859,30 @@ func TestRegister_EnsureWatchSyncError(t *testing.T) {
 
 	err := dc.Register(ctx, gvr, handler)
 	assert.Error(t, err)
+	assert.ErrorIs(t, err, kwatch.ErrCacheSyncTimeout)
 	assert.Contains(t, err.Error(), "cache sync timeout")
+
+	// The parent informer is retained and the registration is recorded, so the
+	// informer keeps converging in the background instead of being rebuilt on
+	// every RGD reconcile, and Deregister can release it.
+	assert.Equal(t, 1, dc.watches.ActiveWatchCount(), "parent informer must be retained after sync timeout")
+	_, recorded := dc.parentWatches.Load(gvr)
+	assert.True(t, recorded, "parent watch must be recorded so Deregister releases it")
+	_, hasHandler := dc.handlers.Load(gvr)
+	assert.True(t, hasHandler)
+
+	// Re-registration while still unsynced waits again and keeps reporting
+	// the timeout, so the RGD is not marked active early.
+	err = dc.Register(ctx, gvr, handler)
+	assert.ErrorIs(t, err, kwatch.ErrCacheSyncTimeout)
+	assert.Equal(t, 1, dc.watches.ActiveWatchCount(), "re-registration reuses the retained informer")
+
+	// Deregister releases the parent ownership and stops the informer -- the
+	// path an RGD deletion takes even if Register never succeeded.
+	require.NoError(t, dc.Deregister(ctx, gvr))
+	assert.Equal(t, 0, dc.watches.ActiveWatchCount(), "Deregister must release the retained parent informer")
+	_, recorded = dc.parentWatches.Load(gvr)
+	assert.False(t, recorded)
 }
 
 func TestGetInformer_ReturnsNil_ForMissingWatch(t *testing.T) {

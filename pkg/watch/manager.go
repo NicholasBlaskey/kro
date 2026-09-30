@@ -16,9 +16,11 @@ package watch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -29,6 +31,12 @@ import (
 	"k8s.io/client-go/metadata/metadatainformer"
 	"k8s.io/client-go/tools/cache"
 )
+
+// ErrCacheSyncTimeout is returned (wrapped) by [Manager.EnsureWatch] when the
+// informer's initial cache sync did not complete within SyncTimeout. The
+// caller's retention is kept and the informer keeps running; callers that
+// need a synced cache should retry EnsureWatch later.
+var ErrCacheSyncTimeout = errors.New("cache sync timeout")
 
 // MetricsRecorder receives observability signals from a [Manager]. It is
 // optional: leave [Manager.Metrics] nil to disable instrumentation. The
@@ -82,6 +90,12 @@ type gvrWatch struct {
 	handlerReg cache.ResourceEventHandlerRegistration
 	cancel     context.CancelFunc
 	log        logr.Logger
+
+	// lastErr is the most recent list/watch error reported by the reflector,
+	// recorded so a sync-timeout error can say why the cache is not ready
+	// (e.g. Forbidden vs. a list that is simply still in progress). Written on
+	// the reflector goroutine, read by EnsureWatch.
+	lastErr atomic.Pointer[error]
 }
 
 // NewManager creates a Manager. The onEvent callback is invoked for every
@@ -112,11 +126,15 @@ func (m *Manager) SetInformerFactory(f func(schema.GroupVersionResource) cache.S
 // (up to SyncTimeout) so callers can rely on a usable cache on return.
 // Idempotent for a given ownerID.
 //
-// On sync timeout only ownerID's retention is dropped -- the informer is never
-// force-stopped. If another owner attached while we were waiting, the informer
-// keeps running under that owner (and it gets its own chance to wait for
-// sync); if we were the sole owner, releasing empties the owner set and the
-// informer stops naturally.
+// On sync timeout the informer is NOT stopped and ownerID's retention is kept:
+// the reflector keeps listing/watching in the background with its own bounded
+// backoff, so partial progress on a large collection is preserved and a later
+// EnsureWatch finds the same informer (possibly already synced) instead of
+// rebuilding it and reissuing a full list. The returned error wraps
+// [ErrCacheSyncTimeout] and, when the reflector has reported one, the last
+// list/watch error. Callers therefore still hold the watch after a timeout and
+// release it through their normal teardown (ReleaseWatch), exactly as after a
+// successful EnsureWatch.
 func (m *Manager) EnsureWatch(gvr schema.GroupVersionResource, ownerID string) error {
 	m.mu.Lock()
 	if m.owners[gvr] == nil {
@@ -148,10 +166,13 @@ func (m *Manager) EnsureWatch(gvr schema.GroupVersionResource, ownerID string) e
 
 	if !cache.WaitForCacheSync(syncCtx.Done(), w.informer.HasSynced) {
 		m.observeInformerSync(gvr, time.Since(syncStart))
-		// Drop our retention only. See the method comment for why we never
-		// force-stop here.
-		m.ReleaseWatch(gvr, ownerID)
-		return fmt.Errorf("cache sync timeout for %s", gvr)
+		// Keep the informer and our retention (see the method comment).
+		// Surface the reflector's last error, if any, so the caller can tell a
+		// slow initial list from a hard failure such as Forbidden.
+		if p := w.lastErr.Load(); p != nil {
+			return fmt.Errorf("%w for %s (last list/watch error: %w)", ErrCacheSyncTimeout, gvr, *p)
+		}
+		return fmt.Errorf("%w for %s", ErrCacheSyncTimeout, gvr)
 	}
 	m.observeInformerSync(gvr, time.Since(syncStart))
 	return nil
@@ -234,15 +255,16 @@ func (m *Manager) defaultCreateInformer(gvr schema.GroupVersionResource) cache.S
 func (m *Manager) newWatch(gvr schema.GroupVersionResource) *gvrWatch {
 	inf := m.createInformer(gvr)
 
-	_ = inf.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
-		m.log.V(1).Error(err, "Watch error", "gvr", gvr)
-	})
-
 	w := &gvrWatch{
 		gvr:      gvr,
 		informer: inf,
 		log:      m.log.WithValues("gvr", gvr.String()),
 	}
+
+	_ = inf.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
+		w.lastErr.Store(&err)
+		m.log.V(1).Error(err, "Watch error", "gvr", gvr)
+	})
 
 	// Register a single event handler that converts informer callbacks
 	// into normalized Event structs and dispatches via onEvent.

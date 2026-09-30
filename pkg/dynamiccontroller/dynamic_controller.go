@@ -388,17 +388,23 @@ func (dc *DynamicController) Register(
 	// Store handler.
 	dc.handlers.Store(parent, instanceHandler)
 
-	// Re-registration: just enqueue existing instances.
+	// Re-registration: the parent handler is already attached. Wait for the
+	// cache again (a still-warming informer keeps returning the sync-timeout
+	// error until it converges, so the RGD is not marked active early), then
+	// enqueue existing instances.
 	if _, exists := dc.parentWatches.Load(parent); exists {
+		if err := dc.watches.EnsureWatch(parent, "parent"); err != nil {
+			return fmt.Errorf("add parent handler %s: %w", parent, err)
+		}
 		dc.enqueueExistingInstances(parent)
 		return nil
 	}
 
-	// Retain the shared informer for the parent and wait for cache sync.
-	if err := dc.watches.EnsureWatch(parent, "parent"); err != nil {
-		dc.handlers.Delete(parent)
-		return fmt.Errorf("add parent handler %s: %w", parent, err)
-	}
+	// Retain the shared informer for the parent and wait for cache sync. The
+	// only error is a sync timeout, in which case the informer is retained and
+	// still converging: attach the handler anyway so the registration is
+	// recorded (and Deregister can release it), then report the timeout below.
+	syncErr := dc.watches.EnsureWatch(parent, "parent")
 
 	// Deferred cleanup on any error below.
 	cleanupWatch := true
@@ -427,6 +433,13 @@ func (dc *DynamicController) Register(
 	metrics.DynHandlerAttachTotal.WithLabelValues("parent").Inc()
 	metrics.DynHandlerCount.WithLabelValues("parent").Inc()
 	dc.log.V(1).Info("Attached parent watch", "gvr", parent)
+
+	if syncErr != nil {
+		// Registered and retained, but the cache is not synced yet. Existing
+		// instances arrive through the handler as the informer converges; the
+		// caller retries Register (re-registration path) until the wait passes.
+		return fmt.Errorf("add parent handler %s: %w", parent, syncErr)
+	}
 
 	// Enqueue existing instances from parent cache.
 	dc.enqueueExistingInstances(parent)

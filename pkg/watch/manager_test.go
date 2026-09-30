@@ -15,6 +15,7 @@
 package watch
 
 import (
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -381,10 +382,48 @@ func TestEnsureWatch_SyncTimeout(t *testing.T) {
 	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 	err := wm.EnsureWatch(gvr, "test")
 	assert.Error(t, err)
+	assert.True(t, errors.Is(err, ErrCacheSyncTimeout), "timeout must be the typed sentinel: %v", err)
 	assert.Contains(t, err.Error(), "cache sync timeout")
+	// The reflector's error is surfaced so the caller can see why.
+	assert.Contains(t, err.Error(), "simulated list error")
 
-	// Broken watch should be cleaned up so a future EnsureWatch can retry.
+	// The informer is retained (not discarded) and the caller still owns it:
+	// its reflector keeps retrying in the background, and a later EnsureWatch
+	// reuses it instead of rebuilding and reissuing a full list/watch.
+	assert.Equal(t, 1, wm.ActiveWatchCount())
+	wm.mu.Lock()
+	_, owned := wm.owners[gvr]["test"]
+	wm.mu.Unlock()
+	assert.True(t, owned, "caller keeps its retention after a sync timeout")
+
+	// Normal teardown by the owner is what stops it.
+	wm.ReleaseWatch(gvr, "test")
 	assert.Equal(t, 0, wm.ActiveWatchCount())
+}
+
+func TestEnsureWatch_SyncTimeout_NoReflectorErrorYet(t *testing.T) {
+	// A slow-but-progressing initial list reports no error at all; the timeout
+	// message must not claim one. Simulate with a list that blocks past the
+	// sync timeout.
+	scheme := runtime.NewScheme()
+	_ = v1.AddMetaToScheme(scheme)
+	client := fake.NewSimpleMetadataClient(scheme)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	client.PrependReactor("list", "*", func(clienttesting.Action) (bool, runtime.Object, error) {
+		<-release
+		return false, nil, nil
+	})
+
+	wm := NewWatchManager(client, 1*time.Hour, func(Event) {}, noopLogger())
+	wm.SyncTimeout = 100 * time.Millisecond
+	t.Cleanup(wm.Shutdown)
+
+	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	err := wm.EnsureWatch(gvr, "test")
+	assert.True(t, errors.Is(err, ErrCacheSyncTimeout))
+	assert.NotContains(t, err.Error(), "last list/watch error")
+	assert.Equal(t, 1, wm.ActiveWatchCount())
 }
 
 func TestEnsureWatch_SyncTimeout_RetrySucceeds(t *testing.T) {
@@ -409,14 +448,17 @@ func TestEnsureWatch_SyncTimeout_RetrySucceeds(t *testing.T) {
 
 	err := wm.EnsureWatch(gvr, "test")
 	assert.Error(t, err)
-	assert.Equal(t, 0, wm.ActiveWatchCount(), "broken watch should be removed")
+	assert.Equal(t, 1, wm.ActiveWatchCount(), "unsynced informer is retained, not removed")
+	retained := wm.GetInformer(gvr)
 
-	// Second call: lists succeed → should create fresh informer and sync.
+	// Second call: lists succeed. The retained informer's own reflector
+	// relists and syncs, so the retry reuses it rather than building a new one.
 	failList.Store(false)
 	wm.SyncTimeout = 5 * time.Second
 	err = wm.EnsureWatch(gvr, "test")
 	assert.NoError(t, err)
-	assert.Equal(t, 1, wm.ActiveWatchCount(), "retry should succeed with fresh informer")
+	assert.Equal(t, 1, wm.ActiveWatchCount())
+	assert.Same(t, retained, wm.GetInformer(gvr), "retry must reuse the retained informer")
 	wm.Shutdown()
 }
 
@@ -546,7 +588,7 @@ func TestEnsureWatch_AtomicOwnerAndWatch(t *testing.T) {
 	assert.Nil(t, wm.GetInformer(gvr))
 }
 
-func TestEnsureWatch_SyncTimeout_CleansUpOwner(t *testing.T) {
+func TestEnsureWatch_SyncTimeout_OwnerReleaseStopsInformer(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = v1.AddMetaToScheme(scheme)
 	client := fake.NewSimpleMetadataClient(scheme)
@@ -563,13 +605,16 @@ func TestEnsureWatch_SyncTimeout_CleansUpOwner(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cache sync timeout")
 
-	// Both the watch and the owner should be cleaned up.
-	assert.Equal(t, 0, wm.ActiveWatchCount())
+	// Watch and owner are both retained after the timeout.
+	assert.Equal(t, 1, wm.ActiveWatchCount())
 
-	// Verify owner was removed by checking that a new EnsureWatch + Release
-	// doesn't leave stale state.
+	// The owner's normal release is what tears it down, leaving no stale state.
 	wm.ReleaseWatch(gvr, "owner-a")
 	assert.Equal(t, 0, wm.ActiveWatchCount())
+	wm.mu.Lock()
+	_, ownersLeft := wm.owners[gvr]
+	wm.mu.Unlock()
+	assert.False(t, ownersLeft)
 }
 
 func TestSyncTimeout_DefaultValue(t *testing.T) {
