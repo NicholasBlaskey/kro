@@ -24,7 +24,6 @@
 package coordinator
 
 import (
-	"fmt"
 	"sync"
 
 	"github.com/go-logr/logr"
@@ -195,9 +194,32 @@ func (c *Coordinator[K]) For(key K) Watcher {
 // declared watch set covers it. Both current labels and old labels are
 // considered for collection watches so that an object losing its label match
 // still triggers reconciliation.
+//
+// An EventSynced (the informer's initial list just completed) is routed to
+// every owner with any watch on the GVR, regardless of name or selector: those
+// owners declared their watches while the cache was still warming, so a change
+// that happened before the list completed (an object that was created and then
+// deleted, say) produced no Add/Update/Delete event. One re-reconcile closes
+// that window.
 func (c *Coordinator[K]) RouteEvent(event kwatch.Event) {
 	c.mu.RLock()
 	matched := make(map[K]struct{})
+
+	if event.Type == kwatch.EventSynced {
+		for _, entries := range c.scalarIndex[event.GVR] {
+			for _, entry := range entries {
+				matched[entry.key] = struct{}{}
+			}
+		}
+		for _, entry := range c.collectionIndex[event.GVR] {
+			matched[entry.key] = struct{}{}
+		}
+		c.mu.RUnlock()
+		for key := range matched {
+			c.enqueue(key)
+		}
+		return
+	}
 
 	if byName, ok := c.scalarIndex[event.GVR]; ok {
 		nn := types.NamespacedName{Name: event.Name, Namespace: event.Namespace}
@@ -310,8 +332,10 @@ func (c *Coordinator[K]) RemoveWhere(pred func(K) bool) {
 
 // addWatch enrolls a request under key. Called from watcher.Watch. EnsureWatch
 // is invoked outside the coordinator lock to avoid holding two locks
-// simultaneously. On EnsureWatch failure the added entry is rolled back and
-// the wrapped error is returned.
+// simultaneously. It only retains/starts the informer and never blocks on its
+// initial list, so a reconcile is never held up (or failed) by a watch that
+// cannot sync yet; the Manager emits EventSynced once the cache is live and
+// RouteEvent re-enqueues every owner of the GVR at that point.
 func (c *Coordinator[K]) addWatch(key K, req WatchRequest) error {
 	c.mu.Lock()
 
@@ -358,19 +382,7 @@ func (c *Coordinator[K]) addWatch(key K, req WatchRequest) error {
 
 	c.stopWatches(orphaned)
 
-	if err := c.watches.EnsureWatch(gvr, ownerCoordinator); err != nil {
-		c.mu.Lock()
-		if state, ok := c.owners[key]; ok {
-			if cur, exists := state.current[k]; exists && SameWatchTarget(cur, &req) {
-				delete(state.current, k)
-				if prev, shared := state.previous[k]; !shared || !SameWatchTarget(prev, cur) {
-					c.removeRequestFromIndexesLocked(key, cur)
-				}
-			}
-		}
-		c.mu.Unlock()
-		return fmt.Errorf("ensure watch for %s: %w", gvr, err)
-	}
+	c.watches.EnsureWatch(gvr, ownerCoordinator)
 	return nil
 }
 

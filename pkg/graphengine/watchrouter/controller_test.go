@@ -77,7 +77,20 @@ func TestDCForGraphAndRemove(t *testing.T) {
 	}
 
 	// RemoveGraph drops the watch — subsequent informer events must
-	// produce nothing on the channel.
+	// produce nothing on the channel. First settle the informer: once its
+	// initial list completes the Manager emits EventSynced, which re-enqueues
+	// graphA once; drain that so it is not mistaken for a post-remove event.
+	require.NoError(t, dc.Manager().WaitForSync(context.Background(), gvrA))
+	drain := time.After(200 * time.Millisecond)
+drained:
+	for {
+		select {
+		case ev := <-dc.events:
+			assert.Equal(t, "g-a", ev.Object.GetName())
+		case <-drain:
+			break drained
+		}
+	}
 	dc.RemoveGraph(graphA)
 	assert.Equal(t, 0, dc.Coordinator().GraphCount())
 	reg.get(gvrA).fireUpdate(

@@ -28,6 +28,7 @@ const (
 	EventAdd    = kwatch.EventAdd
 	EventUpdate = kwatch.EventUpdate
 	EventDelete = kwatch.EventDelete
+	EventSynced = kwatch.EventSynced
 )
 
 // Event is a normalized informer event emitted by the Manager.

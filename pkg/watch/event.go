@@ -33,6 +33,13 @@ const (
 	EventAdd    EventType = "add"
 	EventUpdate EventType = "update"
 	EventDelete EventType = "delete"
+	// EventSynced is emitted once per informer start, when the informer's
+	// initial list has completed and its cache is populated. Only GVR is set.
+	// Consumers use it to re-reconcile every owner that declared a watch on
+	// the GVR before the cache was live, so a change that landed during the
+	// initial list (e.g. an object deleted before it was ever listed) is not
+	// missed. Add/Update/Delete events are never emitted for it.
+	EventSynced EventType = "synced"
 )
 
 // Event is a normalized watch event emitted by the [Manager].

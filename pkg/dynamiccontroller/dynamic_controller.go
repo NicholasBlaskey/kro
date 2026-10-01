@@ -401,8 +401,14 @@ func (dc *DynamicController) Register(
 		return nil
 	}
 
-	// Retain the shared informer for the parent and wait for cache sync.
-	if err := dc.watches.EnsureWatch(parent, "parent"); err != nil {
+	// Retain the shared informer for the parent, then wait for its cache to
+	// sync: this is the one path that reads the informer's store (to enqueue
+	// existing instances below), so it must not proceed on an empty cache. On
+	// timeout drop only our retention; if the coordinator also holds the GVR
+	// (an externalRef on the parent kind) the informer keeps running for it.
+	dc.watches.EnsureWatch(parent, "parent")
+	if err := dc.watches.WaitForSync(*ctx, parent); err != nil {
+		dc.watches.ReleaseWatch(parent, "parent")
 		dc.handlers.Delete(parent)
 		return fmt.Errorf("add parent handler %s: %w", parent, err)
 	}

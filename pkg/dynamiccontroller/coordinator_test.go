@@ -85,10 +85,14 @@ func newTestCoordinator(t *testing.T) (*WatchCoordinator, *enqueueRecorder) {
 	recorder := &enqueueRecorder{}
 
 	// Create WatchManager with a placeholder onEvent; we'll wire the
-	// coordinator's RouteEvent after construction.
+	// coordinator's RouteEvent after construction. The informer-lifecycle
+	// EventSynced is dropped here: it arrives asynchronously from the
+	// Manager's sync goroutine and would make the exact enqueue counts these
+	// tests assert on timing-dependent. Its fan-out is covered in
+	// pkg/watch/coordinator.
 	var coord *WatchCoordinator
 	wm := kwatch.NewManager(client, 1*time.Hour, func(event kwatch.Event) {
-		if coord != nil {
+		if coord != nil && event.Type != kwatch.EventSynced {
 			coord.RouteEvent(event)
 		}
 	}, log)
@@ -302,7 +306,7 @@ func TestStopOrphanedWatch_RemoveInstance(t *testing.T) {
 	assert.Equal(t, 0, coord.watches.ActiveWatchCount(), "expected 0 active watches after removing last requestor")
 
 	// EnsureWatch can re-create it.
-	assert.NoError(t, coord.watches.EnsureWatch(testDeployGVR, "test"))
+	coord.watches.EnsureWatch(testDeployGVR, "test")
 	assert.Equal(t, 1, coord.watches.ActiveWatchCount(), "expected watch to be re-created after EnsureWatch")
 }
 
@@ -845,13 +849,13 @@ func TestAbortInstance_RollsBackCollectionSelectorChange(t *testing.T) {
 	assert.Equal(t, 1, recorder.count(), "previous committed selector should remain active after abort")
 }
 
-func TestAddWatch_EnsureWatchSyncError(t *testing.T) {
+func TestAddWatch_UnsyncedInformerDoesNotFailWatch(t *testing.T) {
 	log := zap.New(zap.UseDevMode(true))
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1.AddMetaToScheme(scheme))
 	client := fake.NewSimpleMetadataClient(scheme)
-	// Fail all list calls.
+	// Fail all list calls so the child informer never syncs.
 	client.PrependReactor("list", "*", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("simulated list error")
 	})
@@ -865,16 +869,25 @@ func TestAddWatch_EnsureWatchSyncError(t *testing.T) {
 
 	watcher := coord.ForInstance(testParentGVR, instance)
 
-	// EnsureWatch fails sync; addWatch now rolls back the added entry and
-	// returns the wrapped error (standardized on the watchrouter behavior).
+	// A child watch whose informer cannot sync neither blocks nor fails the
+	// instance reconcile: the request is indexed and the informer is retained
+	// so it converges in the background (e.g. once RBAC is granted).
+	start := time.Now()
 	err := watcher.Watch(WatchRequest{
 		NodeID:    "deploy",
 		GVR:       testDeployGVR,
 		Name:      "d1",
 		Namespace: "default",
 	})
-	require.Error(t, err) // addWatch propagates EnsureWatch errors
-	assert.ErrorContains(t, err, "ensure watch for")
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), wm.SyncTimeout)
+	watcher.Done(true)
+
+	scalar, _ := coord.WatchRequestCount()
+	assert.Equal(t, 1, scalar)
+	assert.Equal(t, 1, wm.ActiveWatchCount())
+	time.Sleep(2 * wm.SyncTimeout)
+	assert.Equal(t, 1, wm.ActiveWatchCount(), "unsynced child informer is retained across the timeout")
 
 	wm.Shutdown()
 }

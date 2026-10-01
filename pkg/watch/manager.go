@@ -37,8 +37,9 @@ import (
 type MetricsRecorder interface {
 	// SetActiveWatches reports the current number of running informers.
 	SetActiveWatches(active int)
-	// ObserveInformerSync records how long EnsureWatch waited for an
-	// informer's initial cache sync, whether it succeeded or timed out.
+	// ObserveInformerSync records how long a newly started informer took to
+	// complete its initial cache sync. Not recorded for informers stopped
+	// before they synced.
 	ObserveInformerSync(gvr schema.GroupVersionResource, seconds float64)
 }
 
@@ -61,7 +62,7 @@ type Manager struct {
 	// Set at construction time; never nil.
 	onEvent EventHandler
 
-	// SyncTimeout is the maximum time to wait for cache sync in EnsureWatch.
+	// SyncTimeout is the maximum time WaitForSync waits for cache sync.
 	// Zero means use the default (30s).
 	SyncTimeout time.Duration
 
@@ -108,52 +109,73 @@ func (m *Manager) SetInformerFactory(f func(schema.GroupVersionResource) cache.S
 }
 
 // EnsureWatch retains the informer for gvr under ownerID, starting one if
-// none is running yet. It then blocks until the informer reports HasSynced
-// (up to SyncTimeout) so callers can rely on a usable cache on return.
-// Idempotent for a given ownerID.
-//
-// On sync timeout only ownerID's retention is dropped -- the informer is never
-// force-stopped. If another owner attached while we were waiting, the informer
-// keeps running under that owner (and it gets its own chance to wait for
-// sync); if we were the sole owner, releasing empties the owner set and the
-// informer stops naturally.
-func (m *Manager) EnsureWatch(gvr schema.GroupVersionResource, ownerID string) error {
+// none is running yet, and returns immediately. It never waits for the
+// informer's initial list: the informer warms in the background and its
+// reflector keeps retrying list/watch (with its own backoff) until the last
+// owner releases it, so a watch that cannot sync yet -- a slow large
+// collection, or a GVR the identity is not yet allowed to list -- converges on
+// its own once the cause clears, without any caller tearing it down and
+// rebuilding it. When the cache becomes populated the Manager emits a single
+// [EventSynced] for the GVR through the event handler. Callers that read the
+// informer's store must call [Manager.WaitForSync] first. Idempotent for a
+// given ownerID.
+func (m *Manager) EnsureWatch(gvr schema.GroupVersionResource, ownerID string) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.owners[gvr] == nil {
 		m.owners[gvr] = make(map[string]struct{})
 	}
 	m.owners[gvr][ownerID] = struct{}{}
 
-	// Check if watch already exists while still holding the lock.
-	w, alreadyExists := m.watches[gvr]
-	if !alreadyExists {
-		// Create and start the informer while still holding the lock, so no
-		// ReleaseWatch can remove our owner before the watch exists.
-		w = m.newWatch(gvr)
-		m.watches[gvr] = w
-		ctx, cancel := context.WithCancel(context.Background())
-		w.cancel = cancel
-		go w.informer.RunWithContext(ctx)
-		m.recordActiveWatchesLocked()
-		m.log.V(1).Info("Informer started", "gvr", gvr)
+	if _, alreadyExists := m.watches[gvr]; alreadyExists {
+		return
 	}
+	// Create and start the informer while still holding the lock, so no
+	// ReleaseWatch can remove our owner before the watch exists.
+	w := m.newWatch(gvr)
+	m.watches[gvr] = w
+	ctx, cancel := context.WithCancel(context.Background())
+	w.cancel = cancel
+	go w.informer.RunWithContext(ctx)
+	go m.announceSynced(ctx, w)
+	m.recordActiveWatchesLocked()
+	m.log.V(1).Info("Informer started", "gvr", gvr)
+}
 
-	// Release the lock before blocking on cache sync.
-	m.mu.Unlock()
+// announceSynced waits (for the informer's lifetime) for its initial list to
+// complete, records the sync duration, and emits EventSynced so consumers can
+// re-reconcile owners that declared the watch before the cache was live. If
+// the informer is stopped first nothing is emitted.
+func (m *Manager) announceSynced(ctx context.Context, w *gvrWatch) {
+	start := time.Now()
+	if !cache.WaitForCacheSync(ctx.Done(), w.informer.HasSynced) {
+		return
+	}
+	m.observeInformerSync(w.gvr, time.Since(start))
+	w.log.V(1).Info("Informer synced")
+	m.onEvent(Event{Type: EventSynced, GVR: w.gvr})
+}
 
-	// Wait for initial list/sync with a timeout so callers get a usable cache.
-	syncStart := time.Now()
-	syncCtx, syncCancel := context.WithTimeout(context.Background(), m.syncTimeout())
-	defer syncCancel()
-
-	if !cache.WaitForCacheSync(syncCtx.Done(), w.informer.HasSynced) {
-		m.observeInformerSync(gvr, time.Since(syncStart))
-		// Drop our retention only. See the method comment for why we never
-		// force-stop here.
-		m.ReleaseWatch(gvr, ownerID)
+// WaitForSync blocks until the informer for gvr reports HasSynced, the
+// Manager's SyncTimeout elapses, or ctx is done. It is for callers that read
+// the informer's store (the parent/instance watch, which lists existing
+// instances from the cache) and is intentionally separate from EnsureWatch so
+// event-only consumers never pay the wait. A timeout does not touch the
+// informer or the caller's retention; the caller decides whether to release.
+func (m *Manager) WaitForSync(ctx context.Context, gvr schema.GroupVersionResource) error {
+	inf := m.GetInformer(gvr)
+	if inf == nil {
+		return fmt.Errorf("no watch for %s", gvr)
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, m.syncTimeout())
+	defer cancel()
+	if !cache.WaitForCacheSync(syncCtx.Done(), inf.HasSynced) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("cache sync timeout for %s", gvr)
 	}
-	m.observeInformerSync(gvr, time.Since(syncStart))
 	return nil
 }
 

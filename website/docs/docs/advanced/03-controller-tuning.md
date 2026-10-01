@@ -86,17 +86,24 @@ More workers increase throughput but also increase concurrent API server load.
 |---------|---------|-------------|
 | `config.dynamicControllerDefaultResyncPeriod` | 36000 | Seconds between full resyncs (10 hours) |
 | `config.dynamicControllerDefaultQueueMaxRetries` | 20 | Retries before dropping an item |
-| `config.watchSyncTimeout` | `30s` | Maximum time a reconcile waits for a newly started resource watch to finish its initial list |
+| `config.watchSyncTimeout` | `30s` | Maximum time ResourceGraphDefinition activation waits for the instance kind's watch to finish its initial list |
 
 The resync period triggers reconciliation for all resources periodically, even without changes. This catches any drift that might have been missed.
 
-The watch sync timeout bounds how long a single reconcile blocks while the first
-watch on a resource kind lists that kind's existing objects. If a resource has
-very many objects (tens of thousands), its initial list can take longer than the
-default; raise `config.watchSyncTimeout` (also available as the
-`--watch-sync-timeout` flag) so the watch can establish. When the timeout is hit
-the reconcile proceeds without drift detection for that resource and retries on
-the next reconcile.
+The watch sync timeout bounds how long activating a ResourceGraphDefinition
+waits for the watch on its instance kind to list the existing instances. If a
+kind has very many instances (tens of thousands), that initial list can take
+longer than the default; raise `config.watchSyncTimeout` (also available as the
+`--watch-sync-timeout` flag). When the timeout is hit the activation fails and
+is retried on the next ResourceGraphDefinition reconcile.
+
+Watches on child resources and `externalRef`s never block a reconcile. They are
+started on first use and establish in the background: until a watch's initial
+list completes, changes to that resource do not trigger reconciles, and once it
+completes every instance or Graph watching the resource is reconciled once. A
+watch that cannot establish yet (for example because the controller is not yet
+permitted to list the resource) keeps retrying on its own and becomes live as
+soon as the cause is fixed, without any reconcile tearing it down.
 
 ### Instance Requeues
 

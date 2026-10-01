@@ -57,8 +57,11 @@ type Config struct {
 	// (events only); enable it (e.g. 10m) if you want belt-and-braces
 	// drift detection on top of watch events.
 	ResyncPeriod time.Duration
-	// SyncTimeout caps how long EnsureWatch waits for a new informer's
-	// initial list to populate the cache. Zero falls back to 30s.
+	// SyncTimeout bounds Manager.WaitForSync. The Graph path never waits for
+	// an informer's initial list (watches only route events; the executor
+	// reads through the client), so this is unused by the Router itself and
+	// is kept only so the shared Manager is configured uniformly with the
+	// instance controller, whose parent watch does wait. Zero falls back to 30s.
 	SyncTimeout time.Duration
 	// EventBuffer is the size of the channel between coordinator and the
 	// controller-runtime source. When the buffer is full, enqueue drops
