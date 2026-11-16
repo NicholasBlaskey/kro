@@ -75,7 +75,8 @@ type CompilationContext struct {
 	// publishes that schema instead of the value-shape inference of
 	// inferDefSchema — used by the RGD adapter to type the `schema` node
 	// with the RGD's declared SimpleSchema, which stays stable across
-	// reconciles even when the instance is missing fields.
+	// reconciles even when the instance is missing fields. A GVK-targeted
+	// node with an override skips the schema-resolver lookup.
 	nodeSchemaOverrides map[string]*spec.Schema
 
 	// literalNodes declares nodes whose payloads are treated as literal data
@@ -262,9 +263,12 @@ func (ctx *CompilationContext) buildNode(p *parser.Parser, n *expv1alpha1.Node, 
 	if err != nil {
 		return nil, nil, err
 	}
-	sch, err := ctx.schemaResolver.ResolveSchema(gvk)
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolve schema for %s: %w", gvk, err)
+	sch, ok := ctx.nodeSchemaOverrides[n.ID]
+	if !ok {
+		sch, err = ctx.schemaResolver.ResolveSchema(gvk)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve schema for %s: %w", gvk, err)
+		}
 	}
 	mapping, err := ctx.restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	// Memory-cached discovery can still report Fresh after a new CRD appears.
