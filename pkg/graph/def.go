@@ -16,14 +16,13 @@ package graph
 
 import (
 	"fmt"
-	"math"
-	"reflect"
 
 	"github.com/google/cel-go/cel"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	"github.com/kubernetes-sigs/kro/pkg/cel/ast"
+	"github.com/kubernetes-sigs/kro/pkg/graph/defschema"
 	"github.com/kubernetes-sigs/kro/pkg/graph/parser"
 	"github.com/kubernetes-sigs/kro/pkg/graph/schema"
 	"github.com/kubernetes-sigs/kro/pkg/graph/variable"
@@ -120,86 +119,5 @@ func inferDefSchema(bc *buildContext, node *Node, inspector *ast.Inspector) (*sp
 		}
 		exprTypes[v.Path] = checked.OutputType()
 	}
-	return defValueSchema(bc, node.Template.Object, "", exprTypes)
-}
-
-// defValueSchema builds the schema of a def value. Fields whose value is a CEL
-// expression take the expression's output type, other fields take the type of
-// their literal.
-func defValueSchema(bc *buildContext, value any, path string, exprTypes map[string]*cel.Type) (*spec.Schema, error) {
-	switch v := value.(type) {
-	case map[string]any:
-		props := make(map[string]spec.Schema, len(v))
-		for k, child := range v {
-			sch, err := defValueSchema(bc, child, parser.JoinPathAndFieldName(path, k), exprTypes)
-			if err != nil {
-				return nil, err
-			}
-			props[k] = *sch
-		}
-		return &spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"object"}, Properties: props}}, nil
-	case []any:
-		return defListSchema(bc, v, path, exprTypes)
-	case string:
-		if t, ok := exprTypes[path]; ok {
-			return defExprSchema(bc, t)
-		}
-		return defScalarSchema("string"), nil
-	case bool:
-		return defScalarSchema("boolean"), nil
-	case float64:
-		if v == math.Trunc(v) {
-			return defScalarSchema("integer"), nil
-		}
-		return defScalarSchema("number"), nil
-	default:
-		return defDynSchema(), nil
-	}
-}
-
-func defListSchema(bc *buildContext, items []any, path string, exprTypes map[string]*cel.Type) (*spec.Schema, error) {
-	var elem *spec.Schema
-	for i, item := range items {
-		sch, err := defValueSchema(bc, item, parser.JoinPathAndIndex(path, i), exprTypes)
-		if err != nil {
-			return nil, err
-		}
-		if elem == nil {
-			elem = sch
-		} else if !reflect.DeepEqual(elem, sch) {
-			elem = defDynSchema()
-			break
-		}
-	}
-	if elem == nil {
-		elem = defDynSchema()
-	}
-	return &spec.Schema{SchemaProps: spec.SchemaProps{
-		Type:  []string{"array"},
-		Items: &spec.SchemaOrArray{Schema: elem},
-	}}, nil
-}
-
-func defExprSchema(bc *buildContext, t *cel.Type) (*spec.Schema, error) {
-	if t.IsExactType(cel.DynType) {
-		return defDynSchema(), nil
-	}
-	sch, err := schema.CELTypeToSchema(t, bc.typeProvider)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert CEL type %q to a schema: %w", t.String(), err)
-	}
-	return sch, nil
-}
-
-func defScalarSchema(typ string) *spec.Schema {
-	return &spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{typ}}}
-}
-
-// defDynSchema declares a field of unknown type. An empty schema is dropped
-// from its parent when converted to a CEL type, so the int-or-string marker is
-// used to get a dyn declaration.
-func defDynSchema() *spec.Schema {
-	s := &spec.Schema{}
-	s.AddExtension("x-kubernetes-int-or-string", true)
-	return s
+	return defschema.Infer(node.Template.Object, exprTypes, bc.typeProvider)
 }
