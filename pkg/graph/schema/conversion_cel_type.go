@@ -20,6 +20,7 @@ import (
 	"github.com/google/cel-go/cel"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiservercel "k8s.io/apiserver/pkg/cel"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	krocel "github.com/kubernetes-sigs/kro/pkg/cel"
 )
@@ -64,6 +65,16 @@ func primitiveTypeToSchema(typeName string) (*extv1.JSONSchemaProps, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// CELTypeToSchema converts a CEL type to an OpenAPI schema suitable for
+// declaring a typed CEL variable.
+func CELTypeToSchema(celType *cel.Type, provider *krocel.DeclTypeProvider) (*spec.Schema, error) {
+	props, err := inferSchemaFromCELType(celType, provider)
+	if err != nil {
+		return nil, err
+	}
+	return ConvertJSONSchemaPropsToSpecSchema(props)
 }
 
 // inferSchemaFromCELType converts a CEL type to an OpenAPI schema.
